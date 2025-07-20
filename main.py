@@ -5,8 +5,7 @@ from datetime import datetime, timedelta
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    BotCommand
+    InlineKeyboardMarkup
 )
 from telegram.ext import (
     Application,
@@ -135,7 +134,7 @@ async def generate_phrase() -> str:
     except Exception as e:
         logger.error(f"خطأ في الذكاء الاصطناعي: {e}")
         return "أحياناً يصمت القلب لأن الكلمات لا تستطيع أن تحمل كل ما بداخله."
-      # ========== إدارة القنوات ==========
+        # ========== إدارة القنوات ==========
 async def check_bot_permissions(context: CallbackContext, chat_id: int) -> bool:
     """التحقق من صلاحيات البوت في القناة"""
     try:
@@ -175,47 +174,56 @@ async def update_channel_description(context: CallbackContext, chat_id: int, tit
         logger.error(f"خطأ في تحديث الوصف: {e}")
 
 # ========== النشر التلقائي ==========
-async def scheduled_post(context: CallbackContext):
+async def scheduled_post():
     """نشر المحتوى المجدول"""
-    channels = get_all_channels()
-    now = datetime.now(TIMEZONE)
-    
-    for channel in channels:
-        channel_id, title, schedule, next_post = channel[1:5]
-        next_post = datetime.strptime(next_post, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=TIMEZONE)
-        
-        if now >= next_post:
-            try:
-                # توليد المحتوى
-                phrase = await generate_phrase()
+    while True:
+        try:
+            channels = get_all_channels()
+            now = datetime.now(TIMEZONE)
+            
+            for channel in channels:
+                channel_id, title, schedule, next_post = channel[1:5]
+                next_post = datetime.strptime(next_post, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=TIMEZONE)
                 
-                # إرسال المحتوى
-                await context.bot.send_message(
-                    chat_id=channel_id,
-                    text=phrase
-                )
-                logger.info(f"تم النشر في قناة: {title}")
-                
-                # تحديث وقت النشر التالي
-                hours = int(schedule.split('h')[0])
-                new_next_post = now + timedelta(hours=hours)
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.cursor()
-                cursor.execute('''
-                UPDATE channels SET next_post = ? 
-                WHERE channel_id = ?
-                ''', (new_next_post, channel_id))
-                conn.commit()
-                conn.close()
-                
-            except Exception as e:
-                logger.error(f"خطأ في النشر للقناة {title}: {e}")
-                # إزالة القناة إذا لم يعد البوت موجودًا
-                try:
-                    await context.bot.get_chat(channel_id)
-                except:
-                    remove_channel(channel_id)
-                    logger.info(f"تم إزالة القناة {title} من الجدولة")
+                if now >= next_post:
+                    try:
+                        # توليد المحتوى
+                        phrase = await generate_phrase()
+                        
+                        # إرسال المحتوى
+                        application = Application.builder().token(BOT_TOKEN).build()
+                        await application.initialize()
+                        await application.bot.send_message(
+                            chat_id=channel_id,
+                            text=phrase
+                        )
+                        logger.info(f"تم النشر في قناة: {title}")
+                        
+                        # تحديث وقت النشر التالي
+                        hours = int(schedule.split('h')[0])
+                        new_next_post = now + timedelta(hours=hours)
+                        conn = sqlite3.connect(DB_PATH)
+                        cursor = conn.cursor()
+                        cursor.execute('''
+                        UPDATE channels SET next_post = ? 
+                        WHERE channel_id = ?
+                        ''', (new_next_post, channel_id))
+                        conn.commit()
+                        conn.close()
+                        
+                    except Exception as e:
+                        logger.error(f"خطأ في النشر للقناة {title}: {e}")
+                        # إزالة القناة إذا لم يعد البوت موجودًا
+                        try:
+                            await application.bot.get_chat(channel_id)
+                        except:
+                            remove_channel(channel_id)
+                            logger.info(f"تم إزالة القناة {title} من الجدولة")
+            # الانتظار لمدة 5 دقائق قبل الفحص التالي
+            await asyncio.sleep(300)
+        except Exception as e:
+            logger.error(f"خطأ في جدولة النشر: {e}")
+            await asyncio.sleep(60)
 
 # ========== واجهة المستخدم ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -275,8 +283,8 @@ async def new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 text=f"✅ تم تفعيل البوت بنجاح في قناة {title}!\n\nالرجاء تحديد جدول النشر:",
                 reply_markup=reply_markup
-      )
-          # ========== معالجة الأزرار ==========
+                                )
+            # ========== معالجة الأزرار ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالجة ضغطات الأزرار"""
     query = update.callback_query
@@ -383,12 +391,11 @@ def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members))
     
     # بدء جدولة المهام
-    scheduler.add_job(scheduled_post, 'interval', minutes=5, args=[app])
-    scheduler.start()
+    asyncio.create_task(scheduled_post())
     
     logger.info("بدأ البوت في العمل...")
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
-  
+    import asyncio
+    asyncio.run(main())
