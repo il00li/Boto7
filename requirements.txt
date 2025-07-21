@@ -1,4 +1,3 @@
 python-telegram-bot==20.3
-requests
-pytz
-python-dotenv
+fastapi==0.110.1
+uvicorn==0.29.0
