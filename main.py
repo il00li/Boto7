@@ -6,7 +6,7 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters, JobQueue
+    MessageHandler, ContextTypes, filters
 )
 import google.generativeai as genai
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -18,13 +18,18 @@ GEMINI_API_KEY = "AIzaSyAEULfP5zi5irv4yRhFugmdsjBoLk7kGsE"
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-pro")
 
-# بيانات المستخدمين
+# قاعدة بيانات المستخدمين
 users_db = {}
-vip_users = {}
 
 def get_user(user_id):
     if user_id not in users_db:
-        users_db[user_id] = {"channels": [], "vip": False, "invite_count": 0, "invite_link": None}
+        users_db[user_id] = {
+            "channels": [],
+            "vip": False,
+            "invite_count": 0,
+            "invite_link": None,
+            "vip_expiry": None
+        }
     return users_db[user_id]
 
 # رسالة الترحيب مع لوحة التحكم
@@ -43,7 +48,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 أهلاً بك في بوت النشر التلقائي للقنوات!\n\n"
         "يمكنك إضافة البوت لقناتك، ثم نشر محتوى فوري أو جدولة النشر حسب رغبتك.\n"
         "قسم الجدولة متاح فقط لمشتركي VIP.\n"
-        "لمعرفة المزيد، تواصل مع المدير."
+        "للحصول على VIP شارك رابط دعوتك مع 10 أشخاص أو تواصل مع المدير."
     )
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -69,7 +74,6 @@ async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_data["channels"]:
         await update.callback_query.answer("أضف البوت إلى قناتك أولاً.", show_alert=True)
         return
-    # اختر نوع المحتوى افتراضي أو اسأل المستخدم
     keyboard = [
         [InlineKeyboardButton("🖤 عبارات سوداء", callback_data="post_type_black")],
         [InlineKeyboardButton("🕌 خواطر إسلامية", callback_data="post_type_islamic")],
@@ -94,7 +98,8 @@ async def post_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user(user_id)
-    if not user_data["vip"]:
+    # تحقق من صلاحية VIP
+    if not user_data["vip"] or (user_data["vip_expiry"] and time.time() > user_data["vip_expiry"]):
         await update.callback_query.answer(
             "قسم الجدولة متاح فقط لمشتركي VIP.\nللحصول على VIP شارك رابط دعوتك مع 10 أشخاص أو تواصل مع المدير.",
             show_alert=True
@@ -115,11 +120,11 @@ def schedule_job(context, user_id, interval_hours, content_type):
     scheduler = BackgroundScheduler()
     user_data = get_user(user_id)
 
-    def job():
-        content = context.run_coroutine(generate_content(content_type))
+    async def job():
+        content = await generate_content(content_type)
         for channel in user_data["channels"]:
-            context.bot.send_message(chat_id=channel, text=content)
-    scheduler.add_job(job, 'interval', hours=interval_hours)
+            await context.bot.send_message(chat_id=channel, text=content)
+    scheduler.add_job(lambda: context.application.create_task(job()), 'interval', hours=interval_hours)
     scheduler.start()
 
 async def handle_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -146,7 +151,7 @@ async def handle_content_schedule(update: Update, context: ContextTypes.DEFAULT_
     schedule_job(context, user_id, interval_hours, content_type)
     await update.callback_query.answer(f"تم تفعيل النشر المجدول كل {interval_hours} ساعة!", show_alert=True)
 
-# إضافة قناة المستخدم (يتم عبر event في Telegram بعد إضافة البوت كـ admin في القناة)
+# إضافة القناة عند إضافة البوت كمدير في قناة
 async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     channel_id = update.message.chat_id
@@ -191,6 +196,7 @@ async def handle_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ref_user["invite_count"] += 1
     if ref_user["invite_count"] >= 10:
         ref_user["vip"] = True
+        ref_user["vip_expiry"] = time.time() + 30*24*60*60  # شهر واحد
         await context.bot.send_message(ref_id, "🎉 تم تفعيل عضوية VIP لمدة شهر! يمكنك الآن استخدام الجدولة.")
     await update.message.reply_text("شكراً لانضمامك عبر رابط الدعوة!")
 
@@ -202,7 +208,8 @@ async def activate_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = int(update.message.text.split()[1])
         user_data = get_user(target_id)
         user_data["vip"] = True
-        await update.message.reply_text(f"تم تفعيل VIP للمستخدم {target_id}")
+        user_data["vip_expiry"] = time.time() + 30*24*60*60
+        await update.message.reply_text(f"تم تفعيل VIP للمستخدم {target_id} لمدة شهر")
     except Exception:
         await update.message.reply_text("صيغة الأمر: /vip user_id")
 
