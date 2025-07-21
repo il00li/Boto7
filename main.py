@@ -1,405 +1,228 @@
 import os
-import logging
-import sqlite3
-import asyncio
-from datetime import datetime, timedelta
+import time
+import random
 from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-    CallbackContext
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ContextTypes, filters, JobQueue
 )
-import requests
-import pytz
+import google.generativeai as genai
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# ========== إعدادات البوت ==========
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '7639996535:AAH_Ppw8jeiUg4nJjjEyOXaYlip289jSAio')
-DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', 'sk-55fff87d368c44c3b151a74bdfc793a0')
-DB_PATH = os.environ.get('DB_PATH', 'channels.db')
-TIMEZONE = pytz.timezone('Asia/Riyadh')
+TELEGRAM_TOKEN = "7639996535:AAH_Ppw8jeiUg4nJjjEyOXaYlip289jSAio"
+ADMIN_ID = 7251748706
+GEMINI_API_KEY = "AIzaSyAEULfP5zi5irv4yRhFugmdsjBoLk7kGsE"
 
-# إعداد التسجيل
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-pro")
 
-# ========== إدارة قاعدة البيانات ==========
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS channels (
-        id INTEGER PRIMARY KEY,
-        channel_id INTEGER UNIQUE NOT NULL,
-        title TEXT NOT NULL,
-        schedule TEXT NOT NULL,
-        next_post DATETIME NOT NULL
-    )
-    ''')
-    conn.commit()
-    conn.close()
+# بيانات المستخدمين
+users_db = {}
+vip_users = {}
 
-def add_channel(channel_id, title, schedule):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    next_post = datetime.now(TIMEZONE) + timedelta(hours=int(schedule.split('h')[0]))
-    cursor.execute('''
-    INSERT OR REPLACE INTO channels (channel_id, title, schedule, next_post)
-    VALUES (?, ?, ?, ?)
-    ''', (channel_id, title, schedule, next_post))
-    conn.commit()
-    conn.close()
-    return next_post
+def get_user(user_id):
+    if user_id not in users_db:
+        users_db[user_id] = {"channels": [], "vip": False, "invite_count": 0, "invite_link": None}
+    return users_db[user_id]
 
-def remove_channel(channel_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM channels WHERE channel_id = ?', (channel_id,))
-    conn.commit()
-    conn.close()
-
-def get_channel(channel_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM channels WHERE channel_id = ?', (channel_id,))
-    channel = cursor.fetchone()
-    conn.close()
-    return channel
-
-def get_all_channels():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM channels')
-    channels = cursor.fetchall()
-    conn.close()
-    return channels
-
-def update_schedule(channel_id, schedule):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    next_post = datetime.now(TIMEZONE) + timedelta(hours=int(schedule.split('h')[0]))
-    cursor.execute('''
-    UPDATE channels SET schedule = ?, next_post = ? 
-    WHERE channel_id = ?
-    ''', (schedule, next_post, channel_id))
-    conn.commit()
-    conn.close()
-    return next_post
-    # ========== توليد المحتوى ==========
-async def generate_phrase() -> str:
-    """توليد عبارة عاطفية باستخدام DeepSeek API"""
-    url = "https://api.deepseek.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    prompt = (
-        "اكتب عبارة واحدة قصيرة وعميقة باللغة العربية الفصحى السهلة، "
-        "تعبّر عن شعور إنساني حقيقي مثل الخيبة، النضج، الحنين، الوحدة، أو التصالح الداخلي. "
-        "يجب أن تلامس القلب دون تعقيد، كأنها تقول كل شيء في سطر واحد فقط. "
-        "بدون أي علامات تنصيص أو علامات ترقيم زائدة."
-    )
-    
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.8,
-        "max_tokens": 50
-    }
-    
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        # تحقق من وجود الخيارات والرسالة
-        if 'choices' in data and len(data['choices']) > 0 and 'message' in data['choices'][0]:
-            phrase = data['choices'][0]['message']['content'].strip()
-        else:
-            phrase = "أحياناً يصمت القلب لأن الكلمات لا تستطيع أن تحمل كل ما بداخله."
-        
-        # تنظيف العبارة من علامات التنصيص
-        phrase = phrase.replace('"', '').replace("'", '').replace('«', '').replace('»', '')
-        return phrase
-    
-    except Exception as e:
-        logger.error(f"خطأ في الذكاء الاصطناعي: {e}")
-        return "أحياناً يصمت القلب لأن الكلمات لا تستطيع أن تحمل كل ما بداخله."
-
-# ========== إدارة القنوات ==========
-async def check_bot_permissions(context: CallbackContext, chat_id: int) -> bool:
-    """التحقق من صلاحيات البوت في القناة"""
-    try:
-        bot = context.bot
-        chat = await bot.get_chat(chat_id)
-        
-        # التحقق من أن البوت مشرف
-        admins = await chat.get_administrators()
-        bot_admin = next((admin for admin in admins if admin.user.id == bot.id), None)
-        
-        if not bot_admin:
-            return False
-            
-        # التحقق من الصلاحيات المطلوبة
-        perms = bot_admin.can_post_messages and bot_admin.can_change_info
-        return perms
-        
-    except Exception as e:
-        logger.error(f"خطأ في التحقق من الصلاحيات: {e}")
-        return False
-
-async def update_channel_description(context: CallbackContext, chat_id: int, title: str):
-    """تحديث وصف القناة بإضافة البوت"""
-    try:
-        bot = context.bot
-        chat = await bot.get_chat(chat_id)
-        current_desc = chat.description or ""
-        bot_username = (await bot.get_me()).username
-        
-        # إضافة البوت إذا لم يكن موجودًا
-        if f"@{bot_username}" not in current_desc:
-            new_desc = f"{current_desc}\n\n@{bot_username}" if current_desc else f"@{bot_username}"
-            await bot.set_chat_description(chat_id, new_desc)
-            logger.info(f"تم تحديث وصف القناة {title}")
-            
-    except Exception as e:
-        logger.error(f"خطأ في تحديث الوصف: {e}")
-
-# ========== النشر التلقائي ==========
-async def scheduled_post(context: CallbackContext):
-    """نشر المحتوى المجدول"""
-    try:
-        channels = get_all_channels()
-        now = datetime.now(TIMEZONE)
-        
-        for channel in channels:
-            channel_id, title, schedule, next_post = channel[1:5]
-            next_post = datetime.strptime(next_post, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=TIMEZONE)
-            
-            if now >= next_post:
-                try:
-                    # توليد المحتوى
-                    phrase = await generate_phrase()
-                    
-                    # إرسال المحتوى
-                    await context.bot.send_message(
-                        chat_id=channel_id,
-                        text=phrase
-                    )
-                    logger.info(f"تم النشر في قناة: {title}")
-                    
-                    # تحديث وقت النشر التالي
-                    hours = int(schedule.split('h')[0])
-                    new_next_post = now + timedelta(hours=hours)
-                    conn = sqlite3.connect(DB_PATH)
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                    UPDATE channels SET next_post = ? 
-                    WHERE channel_id = ?
-                    ''', (new_next_post, channel_id))
-                    conn.commit()
-                    conn.close()
-                    
-                except Exception as e:
-                    logger.error(f"خطأ في النشر للقناة {title}: {e}")
-                    # إزالة القناة إذا لم يعد البوت موجودًا
-                    try:
-                        await context.bot.get_chat(channel_id)
-                    except:
-                        remove_channel(channel_id)
-                        logger.info(f"تم إزالة القناة {title} من الجدولة")
-    except Exception as e:
-        logger.error(f"خطأ في جدولة النشر: {e}")
-# ========== واجهة المستخدم ==========
+# رسالة الترحيب مع لوحة التحكم
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر البدء"""
     user = update.effective_user
-    await update.message.reply_text(
-        f"مرحبًا {user.first_name}!\n\n"
-        "أنا بوت النشر التلقائي للعبارات العاطفية ✨\n"
-        "يمكنك إضافتي إلى قناتك ثم تحديد جدول النشر:\n"
-        "• كل 6 ساعات\n"
-        "• كل 12 ساعة\n"
-        "• كل 24 ساعة\n\n"
-        "بعد إضافتي إلى قناتك، استخدم /setup لتحديد الجدول"
-    )
-
-async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إعداد الجدول الزمني"""
-    user = update.effective_user
+    get_user(user.id)
     keyboard = [
-        [InlineKeyboardButton("كل 6 ساعات", callback_data='6h')],
-        [InlineKeyboardButton("كل 12 ساعة", callback_data='12h')],
-        [InlineKeyboardButton("كل 24 ساعة", callback_data='24h')],
+        [InlineKeyboardButton("➕ أضف البوت إلى قناتك", url=f"https://t.me/Boto7Bot?startchannel=start")],
+        [InlineKeyboardButton("🚀 نشر مباشر", callback_data="post_now")],
+        [InlineKeyboardButton("🕒 نشر مجدول (VIP)", callback_data="schedule_menu")],
+        [InlineKeyboardButton("🖤 عبارات سوداء", callback_data="type_black")],
+        [InlineKeyboardButton("🕌 خواطر إسلامية", callback_data="type_islamic")],
+        [InlineKeyboardButton("💬 شعر عربي أصيل", callback_data="type_poetry")],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "⏰ اختر جدول النشر التلقائي للقناة:",
-        reply_markup=reply_markup
+    text = (
+        "👋 أهلاً بك في بوت النشر التلقائي للقنوات!\n\n"
+        "يمكنك إضافة البوت لقناتك، ثم نشر محتوى فوري أو جدولة النشر حسب رغبتك.\n"
+        "قسم الجدولة متاح فقط لمشتركي VIP.\n"
+        "لمعرفة المزيد، تواصل مع المدير."
     )
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة إضافة البوت إلى قناة جديدة"""
-    bot_id = context.bot.id
-    for member in update.message.new_chat_members:
-        if member.id == bot_id:
-            chat = update.effective_chat
-            chat_id = chat.id
-            title = chat.title
-            
-            # التحقق من الصلاحيات
-            if not await check_bot_permissions(context, chat_id):
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="⚠️ يلزم منحي صلاحيتين:\n1. نشر الرسائل\n2. تغيير معلومات المجموعة\n\nالرجاء تعديل الصلاحيات ثم أعد إضافتي."
-                )
-                await context.bot.leave_chat(chat_id)
-                return
-                
-            # تحديث وصف القناة
-            await update_channel_description(context, chat_id, title)
-            
-            # إرسال رسالة ترحيب
-            keyboard = [[InlineKeyboardButton("تحديد جدول النشر ⏰", callback_data='setup_schedule')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ تم تفعيل البوت بنجاح في قناة {title}!\n\nالرجاء تحديد جدول النشر:",
-                reply_markup=reply_markup
-            )
-
-# ========== معالجة الأزرار ==========
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة ضغطات الأزرار"""
-    query = update.callback_query
-    await query.answer()
-    
-    chat_id = query.message.chat_id
-    user_id = query.from_user.id
-    
-    # تحديد الجدول الزمني
-    if query.data in ['6h', '12h', '24h']:
-        channel = get_channel(chat_id)
-        
-        if not channel:
-            # إذا كانت القناة غير مسجلة
-            next_post = add_channel(chat_id, query.message.chat.title, query.data)
-            await query.edit_message_text(
-                text=f"⏰ تم تعيين جدول النشر: كل {query.data}\n\n"
-                     f"⏳ أول منشور سيكون في: {next_post.strftime('%Y-%m-%d %H:%M')}",
-                reply_markup=None
-            )
-        else:
-            # تحديث الجدول الزمني
-            next_post = update_schedule(chat_id, query.data)
-            await query.edit_message_text(
-                text=f"🔄 تم تحديث جدول النشر: كل {query.data}\n\n"
-                     f"⏳ المنشور التالي في: {next_post.strftime('%Y-%m-%d %H:%M')}",
-                reply_markup=None
-            )
-    
-    # طلب تحديد الجدول الزمني
-    elif query.data == 'setup_schedule':
-        keyboard = [
-            [InlineKeyboardButton("كل 6 ساعات", callback_data='6h')],
-            [InlineKeyboardButton("كل 12 ساعة", callback_data='12h')],
-            [InlineKeyboardButton("كل 24 ساعة", callback_data='24h')],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            text="⏰ اختر جدول النشر التلقائي للقناة:",
-            reply_markup=reply_markup
+# توليد المحتوى عبر Gemini
+async def generate_content(content_type):
+    if content_type == "type_black":
+        prompt = "اكتب لي عبارة سودا بسطر واحد بدون اي تعليق او شرح"
+    elif content_type == "type_islamic":
+        prompt = "اكتب لي خاطرة اسلامية بدون تعليق او شرح"
+    elif content_type == "type_poetry":
+        prompt = (
+            "أعطني بيتين من الشعر العربي من شاعر معروف، على أن تكون من دواوينه الموثقة، ومرتبة في سطرين متصلين، بدون أي شروحات أو تعليقات أو مصدر أو اسم كتاب أو رقم صفحة. أذكر فقط اسم الشاعر بعد البيتين، بدون رموز أو زخارف أو إيموجي."
         )
-    
-    # إيقاف النشر
-    elif query.data == 'stop_schedule':
-        remove_channel(chat_id)
-        await query.edit_message_text(
-            text="⛔ تم إيقاف النشر التلقائي في هذه القناة",
-            reply_markup=None
-        )
-
-# ========== إدارة القنوات ==========
-async def manage(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إدارة القنوات"""
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    # التحقق من أن الأمر في قناة
-    if chat_id > 0:
-        await update.message.reply_text("⚠️ هذا الأمر يعمل فقط في القنوات")
-        return
-    
-    channel = get_channel(chat_id)
-    
-    if not channel:
-        await update.message.reply_text("❌ هذه القناة غير مسجلة. استخدم /setup لتسجيلها.")
-        return
-    
-    # عرض معلومات القناة
-    _, _, title, schedule, next_post = channel
-    next_post = datetime.strptime(next_post, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=TIMEZONE)
-    
-    keyboard = [
-        [InlineKeyboardButton("تغيير الجدول الزمني", callback_data='setup_schedule')],
-        [InlineKeyboardButton("إيقاف النشر التلقائي", callback_data='stop_schedule')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    message_text = (
-        f"📋 إدارة القناة: {title}\n\n"
-        f"⏱️ الجدول الحالي: كل {schedule}\n"
-        f"⏳ المنشور التالي: {next_post.strftime('%Y-%m-%d %H:%M')}\n\n"
-        "اختر الإجراء المطلوب:"
-    )
-    
-    await update.message.reply_text(
-        message_text,
-        reply_markup=reply_markup
-    )
-    # ========== تشغيل البوت ==========
-def main():
-    # تهيئة قاعدة البيانات
-    init_db()
-    
-    # إنشاء تطبيق البوت
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # الحصول على job_queue من التطبيق
-    job_queue = application.job_queue
-    
-    # جدولة النشر كل 5 دقائق
-    if job_queue:
-        job_queue.run_repeating(scheduled_post, interval=300, first=10)
     else:
-        logger.error("JobQueue not available")
-    
-    # تسجيل الأوامر
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("setup", setup))
-    application.add_handler(CommandHandler("manage", manage))
-    
-    # معالجات الأزرار
-    application.add_handler(CallbackQueryHandler(button_handler))
-    
-    # معالجة إضافة البوت إلى قنوات
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members))
-    
-    logger.info("بدأ البوت في العمل...")
-    application.run_polling()
+        prompt = "اكتب لي عبارة عشوائية قصيرة"
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
+# نشر مباشر في القناة
+async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = get_user(user_id)
+    if not user_data["channels"]:
+        await update.callback_query.answer("أضف البوت إلى قناتك أولاً.", show_alert=True)
+        return
+    # اختر نوع المحتوى افتراضي أو اسأل المستخدم
+    keyboard = [
+        [InlineKeyboardButton("🖤 عبارات سوداء", callback_data="post_type_black")],
+        [InlineKeyboardButton("🕌 خواطر إسلامية", callback_data="post_type_islamic")],
+        [InlineKeyboardButton("💬 شعر عربي أصيل", callback_data="post_type_poetry")],
+    ]
+    await update.callback_query.message.reply_text(
+        "اختر نوع المحتوى الذي تريد نشره الآن:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# تنفيذ نشر مباشر بعد اختيار نوع المحتوى
+async def post_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = get_user(user_id)
+    content_type = update.callback_query.data.replace("post_type_", "")
+    content = await generate_content(content_type)
+    for channel in user_data["channels"]:
+        await context.bot.send_message(chat_id=channel, text=content)
+    await update.callback_query.answer("تم النشر بنجاح في قنواتك!")
+
+# قائمة جدولة النشر
+async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = get_user(user_id)
+    if not user_data["vip"]:
+        await update.callback_query.answer(
+            "قسم الجدولة متاح فقط لمشتركي VIP.\nللحصول على VIP شارك رابط دعوتك مع 10 أشخاص أو تواصل مع المدير.",
+            show_alert=True
+        )
+        return
+    keyboard = [
+        [InlineKeyboardButton("كل 6 ساعات", callback_data="schedule_6h")],
+        [InlineKeyboardButton("كل 12 ساعة", callback_data="schedule_12h")],
+        [InlineKeyboardButton("كل 24 ساعة", callback_data="schedule_24h")],
+    ]
+    await update.callback_query.message.reply_text(
+        "اختر توقيت النشر المجدول:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# تفعيل الجدولة
+def schedule_job(context, user_id, interval_hours, content_type):
+    scheduler = BackgroundScheduler()
+    user_data = get_user(user_id)
+
+    def job():
+        content = context.run_coroutine(generate_content(content_type))
+        for channel in user_data["channels"]:
+            context.bot.send_message(chat_id=channel, text=content)
+    scheduler.add_job(job, 'interval', hours=interval_hours)
+    scheduler.start()
+
+async def handle_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    interval_map = {"schedule_6h": 6, "schedule_12h": 12, "schedule_24h": 24}
+    interval_hours = interval_map.get(update.callback_query.data)
+    keyboard = [
+        [InlineKeyboardButton("🖤 عبارات سوداء", callback_data=f"scheduled_black_{interval_hours}")],
+        [InlineKeyboardButton("🕌 خواطر إسلامية", callback_data=f"scheduled_islamic_{interval_hours}")],
+        [InlineKeyboardButton("💬 شعر عربي أصيل", callback_data=f"scheduled_poetry_{interval_hours}")],
+    ]
+    await update.callback_query.message.reply_text(
+        f"اختر نوع المحتوى المجدول للنشر كل {interval_hours} ساعة:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def handle_content_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = get_user(user_id)
+    data = update.callback_query.data
+    parts = data.split("_")
+    content_type = f"type_{parts[1]}"
+    interval_hours = int(parts[2])
+    schedule_job(context, user_id, interval_hours, content_type)
+    await update.callback_query.answer(f"تم تفعيل النشر المجدول كل {interval_hours} ساعة!", show_alert=True)
+
+# إضافة قناة المستخدم (يتم عبر event في Telegram بعد إضافة البوت كـ admin في القناة)
+async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    channel_id = update.message.chat_id
+    if update.message.chat.type == "channel":
+        user_data = get_user(user_id)
+        if channel_id not in user_data["channels"]:
+            user_data["channels"].append(channel_id)
+        await context.bot.send_message(channel_id, "✅ تم تفعيل البوت في هذه القناة!")
+
+# زر العبارات السوداء
+async def type_black(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    content = await generate_content("type_black")
+    await update.callback_query.message.reply_text(content)
+
+async def type_islamic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    content = await generate_content("type_islamic")
+    await update.callback_query.message.reply_text(content)
+
+async def type_poetry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    content = await generate_content("type_poetry")
+    await update.callback_query.message.reply_text(content)
+
+# VIP عبر رابط الدعوة
+async def get_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = get_user(user_id)
+    if not user_data["invite_link"]:
+        # توليد رابط دعوة خاص بالمستخدم
+        link = f"https://t.me/Boto7Bot?start=invite_{user_id}_{random.randint(1000,9999)}"
+        user_data["invite_link"] = link
+    await update.message.reply_text(
+        f"للحصول على VIP شارك هذا الرابط مع 10 أشخاص:\n{user_data['invite_link']}\n"
+        "بعد وصول 10 أشخاص ستتفعل ميزة الجدولة لمدة شهر."
+    )
+
+# إدارة الدعوات
+async def handle_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    ref = update.message.text.split("invite_")[1].split("_")[0]
+    ref_id = int(ref)
+    ref_user = get_user(ref_id)
+    ref_user["invite_count"] += 1
+    if ref_user["invite_count"] >= 10:
+        ref_user["vip"] = True
+        await context.bot.send_message(ref_id, "🎉 تم تفعيل عضوية VIP لمدة شهر! يمكنك الآن استخدام الجدولة.")
+    await update.message.reply_text("شكراً لانضمامك عبر رابط الدعوة!")
+
+# تفعيل VIP عبر المدير
+async def activate_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    try:
+        target_id = int(update.message.text.split()[1])
+        user_data = get_user(target_id)
+        user_data["vip"] = True
+        await update.message.reply_text(f"تم تفعيل VIP للمستخدم {target_id}")
+    except Exception:
+        await update.message.reply_text("صيغة الأمر: /vip user_id")
+
+def main():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("vip", activate_vip))
+    app.add_handler(CommandHandler("getvip", get_vip))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, add_channel))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("invite_"), handle_invite))
+    app.add_handler(CallbackQueryHandler(post_now, pattern="post_now"))
+    app.add_handler(CallbackQueryHandler(post_type, pattern="post_type_"))
+    app.add_handler(CallbackQueryHandler(type_black, pattern="type_black"))
+    app.add_handler(CallbackQueryHandler(type_islamic, pattern="type_islamic"))
+    app.add_handler(CallbackQueryHandler(type_poetry, pattern="type_poetry"))
+    app.add_handler(CallbackQueryHandler(schedule_menu, pattern="schedule_menu"))
+    app.add_handler(CallbackQueryHandler(handle_schedule, pattern="schedule_"))
+    app.add_handler(CallbackQueryHandler(handle_content_schedule, pattern="scheduled_"))
+    print("Bot is running...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
