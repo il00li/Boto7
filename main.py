@@ -1,40 +1,42 @@
 from fastapi import FastAPI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-import os
 
-# إعدادات
-TOKEN = os.getenv("7639996535:AAH_Ppw8jeiUg4nJjjEyOXaYlip289jSAio")  # ضعه في بيئة Render
+# 🔐 رمز البوت المباشر (يرجى استبداله عند النشر العام)
+TOKEN = "7639996535:AAH_Ppw8jeiUg4nJjjEyOXaYlip289jSAio"
+
 app = FastAPI()
 
-# دالة توليد رابط البحث
+# 🧠 دالة توليد رابط البحث في Freepik
 def generate_freepik_link(query: str) -> str:
     base_url = "https://www.freepik.com/search"
     return f"{base_url}?format=search&query={query.replace(' ', '+')}"
 
-# أمر البداية
+# 🟢 أمر /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 مرحباً بك!\nأرسل كلمة البحث مثل 'أيقونة ذهب' وسأجلب لك نتائج Freepik 🔍"
+        "👋 مرحباً بك في بوت البحث عن الملفات من Freepik!\n"
+        "📌 فقط أرسل كلمة البحث مثل: *شعار ذهبي* وسأرسل لك رابط النتائج 🔍",
+        parse_mode="Markdown"
     )
 
-# عند استقبال رسالة
+# 🔍 معالج البحث بالنص
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
     link = generate_freepik_link(query)
 
     keyboard = [
-        [InlineKeyboardButton("🔗 فتح Freepik", url=link)]
+        [InlineKeyboardButton("🔗 فتح النتائج في Freepik", url=link)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        f"🔍 نتائج البحث عن: *{query}*\nاضغط الزر أدناه:",
+        f"🔍 نتائج البحث عن: *{query}*",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-# بدء البوت
+# 🚀 تشغيل البوت عند بدء التطبيق
 @app.on_event("startup")
 async def on_startup():
     bot_app = ApplicationBuilder().token(TOKEN).build()
