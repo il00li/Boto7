@@ -4,7 +4,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 import os
 
 # إعدادات
-TOKEN = os.getenv("BOT_TOKEN")  # ضعه في بيئة Render
+TOKEN = os.getenv("7639996535:AAH_Ppw8jeiUg4nJjjEyOXaYlip289jSAio")  # ضعه في بيئة Render
 app = FastAPI()
 
 # دالة توليد رابط البحث
