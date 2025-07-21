@@ -32,7 +32,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     get_user(user.id)
     keyboard = [
-        [InlineKeyboardButton("➕ أضف البوت إلى قناتك", url=f"https://t.me/Boto7Bot?startchannel=start")],
+        [InlineKeyboardButton("➕ أضف البوت إلى قناتك", url=f"https://t.me/BARM7_BOT?startchannel=start")],
         [InlineKeyboardButton("🚀 نشر مباشر", callback_data="post_now")],
         [InlineKeyboardButton("🕒 نشر مجدول (VIP)", callback_data="schedule_menu")],
         [InlineKeyboardButton("🖤 عبارات سوداء", callback_data="type_black")],
