@@ -12,10 +12,10 @@ import google.generativeai as genai
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # إعدادات عامة وقيم أساسية
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-ADMIN_ID = 123456789
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
-FORCE_SUB_CHANNEL = "@YourForceSubChannel"
+TELEGRAM_TOKEN = "7639996535:AAH_Ppw8jeiUg4nJjjEyOXaYlip289jSAio"
+ADMIN_ID = 7251748706
+GEMINI_API_KEY = "AIzaSyAEULfP5zi5irv4yRhFugmdsjBoLk7kGsE"
+FORCE_SUB_CHANNEL = "@crazys7"
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-pro")
