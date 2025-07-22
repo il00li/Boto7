@@ -31,9 +31,13 @@ def check_subscription(member_status):
 
 def fetch_pixabay_images(query):
     url = f"https://pixabay.com/api/?key={PIXABAY_API_KEY}&q={query}&image_type=photo&per_page=30"
-    res = requests.get(url).json()
-    hits = res.get('hits', [])
-    return [hit['webformatURL'] for hit in hits if 'webformatURL' in hit]
+    try:
+        res = requests.get(url, timeout=10).json()
+        hits = res.get('hits', [])
+        return [hit['webformatURL'] for hit in hits if 'webformatURL' in hit]
+    except Exception as e:
+        print("Pixabay API Error:", e)
+        return []
 
 def download_image(url):
     try:
@@ -81,7 +85,7 @@ async def handle_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyword = update.message.text
     results = fetch_pixabay_images(keyword)
     if not results:
-        await update.message.reply_text("❌ لم يتم العثور على نتائج.\nجرب كلمات مثل: nature, business, رمضان")
+        await update.message.reply_text("❌ لم يتم العثور على نتائج.\nجرب كلمات مثل: nature، flowers، رمضان")
         return
     user_states[user_id] = {'step': 'browsing', 'results': results, 'index': 0}
     await send_result(update, context, user_id)
@@ -132,7 +136,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyword))
     app.add_handler(CallbackQueryHandler(navigation_callback, pattern='^(next|prev|select)$'))
 
-    # إعداد Webhook تلقائي
     requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
         data={"url": f"{WEBHOOK_URL}/{BOT_TOKEN}", "drop_pending_updates": True}
