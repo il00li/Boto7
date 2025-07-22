@@ -1,6 +1,7 @@
 import os
 import logging
 import requests
+import io
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     ApplicationBuilder,
@@ -18,13 +19,13 @@ PIXABAY_API_KEY = '51444506-bffefcaf12816bd85a20222d1'
 WEBHOOK_URL = 'https://boto7-r0c1.onrender.com'
 PORT = int(os.environ.get('PORT', '8443'))
 
-# ====== STATE MANAGEMENT ======
+# ====== STATE ======
 user_states = {}
 
 # ====== LOGGING ======
 logging.basicConfig(level=logging.INFO)
 
-# ====== UTILS ======
+# ====== HELPERS ======
 def check_subscription(member_status):
     return member_status.status in ['member', 'administrator', 'creator']
 
@@ -33,6 +34,15 @@ def fetch_pixabay_images(query):
     res = requests.get(url).json()
     hits = res.get('hits', [])
     return [hit['webformatURL'] for hit in hits if 'webformatURL' in hit]
+
+def download_image(url):
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            return io.BytesIO(response.content)
+    except Exception as e:
+        print("Download error:", e)
+    return None
 
 # ====== HANDLERS ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -71,14 +81,19 @@ async def handle_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyword = update.message.text
     results = fetch_pixabay_images(keyword)
     if not results:
-        await update.message.reply_text("❌ لم يتم العثور على نتائج.\nجرب كلمات أخرى مثل: nature, business, Ramadan")
+        await update.message.reply_text("❌ لم يتم العثور على نتائج.\nجرب كلمات مثل: nature, business, رمضان")
         return
     user_states[user_id] = {'step': 'browsing', 'results': results, 'index': 0}
     await send_result(update, context, user_id)
 
 async def send_result(update_or_query, context, user_id):
     state = user_states[user_id]
-    img = state['results'][state['index']]
+    url = state['results'][state['index']]
+    image_data = download_image(url)
+    if not image_data:
+        await context.bot.send_message(chat_id=user_id, text="❌ تعذر تحميل الصورة.")
+        return
+
     caption = f"📷 نتيجة {state['index']+1} من {len(state['results'])}"
     kb = [
         [InlineKeyboardButton("⏮️ السابق", callback_data="prev"),
@@ -86,9 +101,9 @@ async def send_result(update_or_query, context, user_id):
         [InlineKeyboardButton("✅ اختيار", callback_data="select")]
     ]
     if isinstance(update_or_query, Update):
-        await context.bot.send_photo(chat_id=user_id, photo=img, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+        await context.bot.send_photo(chat_id=user_id, photo=image_data, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
     else:
-        await update_or_query.edit_message_media(media=InputMediaPhoto(img, caption=caption), reply_markup=InlineKeyboardMarkup(kb))
+        await update_or_query.edit_message_media(media=InputMediaPhoto(image_data, caption=caption), reply_markup=InlineKeyboardMarkup(kb))
 
 async def navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -117,7 +132,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyword))
     app.add_handler(CallbackQueryHandler(navigation_callback, pattern='^(next|prev|select)$'))
 
-    # تفعيل Webhook
+    # إعداد Webhook تلقائي
     requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
         data={"url": f"{WEBHOOK_URL}/{BOT_TOKEN}", "drop_pending_updates": True}
