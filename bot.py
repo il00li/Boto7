@@ -11,7 +11,7 @@ import requests
 # --------- الإعدادات ---------
 API_TOKEN = "7639996535:AAH_Ppw8jeiUg4nJjjEyOXaYlip289jSAio"
 ADMIN_IDS = [7251748706]
-CHANNEL_REQUIRED = "@your_mandatory_channel"  # غيّرها لاحقاً
+CHANNEL_REQUIRED = "@crazys7"  # غيّرها لاحقاً
 GEMINI_API_KEY = "AIzaSyAEULfP5zi5irv4yRhFugmdsjBoLk7kGsE"
 VIP_VALIDITY_DAYS = 30
 MAX_USER_CHANNELS = 2
