@@ -29,7 +29,7 @@ def check_subscription(member_status):
     return member_status.status in ['member', 'administrator', 'creator']
 
 def fetch_freepik_results(query):
-    url = f'https://api.freepik.com/v2/resources?query={query}&limit=30&type=photos'
+    url = f'https://api.freepik.com/v1/resources?query={query}&limit=30&type=photo'
     headers = {'Authorization': f'Bearer {FREEPIK_API_KEY}'}
     res = requests.get(url, headers=headers).json()
     results = res.get('data', [])
@@ -80,7 +80,10 @@ async def handle_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_result(update_or_query, context, user_id):
     state = user_states[user_id]
     item = state['results'][state['index']]
-    img = item['images']['thumbnail']
+    img = item['images'].get('thumbnail')
+    if not img:
+        await context.bot.send_message(chat_id=user_id, text="❌ لا يمكن عرض الصورة.")
+        return
     caption = f"📷 نتيجة {state['index']+1} من {len(state['results'])}"
     keyboard = [
         [InlineKeyboardButton("⏮️ السابق", callback_data="prev"),
