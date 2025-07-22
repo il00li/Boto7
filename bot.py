@@ -1,6 +1,5 @@
 import os
 import logging
-import asyncio
 import aiohttp
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -13,20 +12,15 @@ from telegram.ext import (
     filters
 )
 
-# ====== CONFIG ======
 BOT_TOKEN = '7968375518:AAGvEZbkoL_O1jQ2bWEL8n7bB9sx81uN__E'
 CHANNEL_USERNAME = '@crazys7'
 FREEPIK_API_KEY = 'FPSXd1183dea1da3476a90735318b3930ba3'
 WEBHOOK_URL = 'https://boto7-r0c1.onrender.com'
 PORT = int(os.environ.get('PORT', '8443'))
 
-# ====== STATE MANAGEMENT ======
 user_states = {}
-
-# ====== LOGGING ======
 logging.basicConfig(level=logging.INFO)
 
-# ====== UTILS ======
 def check_subscription(member_status):
     return member_status.status in ['member', 'administrator', 'creator']
 
@@ -36,15 +30,6 @@ def fetch_freepik_results(query):
     res = requests.get(url, headers=headers).json()
     return res.get('data', [])
 
-async def reset_webhook(bot):
-    async with aiohttp.ClientSession() as session:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-        data = {"url": f"{WEBHOOK_URL}/{BOT_TOKEN}", "drop_pending_updates": True}
-        async with session.post(url, data=data) as resp:
-            result = await resp.json()
-            print("🔁 Webhook reset response:", result)
-
-# ====== HANDLERS ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
@@ -76,8 +61,7 @@ async def start_search_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    state = user_states.get(user_id, {})
-    if state.get('step') != 'waiting_keyword':
+    if user_states.get(user_id, {}).get('step') != 'waiting_keyword':
         return
     keyword = update.message.text
     results = fetch_freepik_results(keyword)
@@ -119,8 +103,17 @@ async def navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     await send_result(query, context, user_id)
 
-# ====== MAIN LOOP ======
-async def main():
+# ✅ تعيين Webhook داخل نفس السياق
+async def reset_webhook(bot):
+    async with aiohttp.ClientSession() as session:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+        data = {"url": f"{WEBHOOK_URL}/{BOT_TOKEN}", "drop_pending_updates": True}
+        async with session.post(url, data=data) as resp:
+            result = await resp.json()
+            print("🔁 Webhook reset:", result)
+
+# ✅ تشغيل البوت مع Webhook
+async def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler('start', start))
@@ -139,4 +132,5 @@ async def main():
     )
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    import asyncio
+    asyncio.run(run_bot())
