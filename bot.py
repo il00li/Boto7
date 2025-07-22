@@ -17,7 +17,7 @@ from telegram.ext import (
 BOT_TOKEN = '7968375518:AAGvEZbkoL_O1jQ2bWEL8n7bB9sx81uN__E'
 CHANNEL_USERNAME = '@crazys7'
 FREEPIK_API_KEY = 'FPSXd1183dea1da3476a90735318b3930ba3'
-WEBHOOK_URL = 'https://boto7-r0c1.onrender.com'
+WEBHOOK_URL = 'https://boto7-12.onrender.com'
 PORT = int(os.environ.get('PORT', '8443'))
 
 # ====== STATE MANAGEMENT ======
