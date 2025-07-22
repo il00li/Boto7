@@ -29,10 +29,11 @@ def check_subscription(member_status):
     return member_status.status in ['member', 'administrator', 'creator']
 
 def fetch_freepik_results(query):
-    url = f'https://api.freepik.com/v2/search?query={query}&limit=30'
+    url = f'https://api.freepik.com/v2/resources?query={query}&limit=30&type=photos'
     headers = {'Authorization': f'Bearer {FREEPIK_API_KEY}'}
     res = requests.get(url, headers=headers).json()
-    return res.get('data', [])
+    results = res.get('data', [])
+    return [r for r in results if 'images' in r and 'thumbnail' in r['images']]
 
 # ====== HANDLERS ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -118,7 +119,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyword))
     app.add_handler(CallbackQueryHandler(navigation_callback, pattern='^(next|prev|select)$'))
 
-    # تسجيل Webhook يدويًا
     requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
         data={"url": f"{WEBHOOK_URL}/{BOT_TOKEN}", "drop_pending_updates": True}
