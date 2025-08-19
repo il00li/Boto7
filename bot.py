@@ -1,213 +1,161 @@
-import os
 import asyncio
-import sqlite3
-from telethon import TelegramClient, events, Button
-from telethon.errors import (
-    PhoneNumberInvalidError, SessionPasswordNeededError,
-    FloodWaitError, ChannelPrivateError, UserNotParticipantError
-)
+import logging
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.functions.channels import GetParticipantRequest
-from telethon.tl.types import InputPeerChannel
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# إعدادات البوت
+# تكوين logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# بيانات API
 API_ID = 23656977
 API_HASH = '49d3f43531a92b3f5bc403766313ca1e'
-BOT_TOKEN = '7917959495:AAH1jcUheiXoxRjPuKfXoUOyK2uPDu53lEE'
-MANDATORY_CHANNELS = ['crazys7', 'AWU87']  # القنوات الإجبارية
+BOT_TOKEN = '8324471840:AAEX2W5x02F-NKZTt7qM0NNovrrF-gFRBsU'
 
-# إعداد قاعدة البيانات
-DB_NAME = 'bot_db.sqlite'
-conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-c = conn.cursor()
+# قاموس لتخزين حالات المستخدمين
+user_sessions = {}
 
-# إنشاء الجداول الأساسية
-c.execute('''CREATE TABLE IF NOT EXISTS users (
-             user_id INTEGER PRIMARY KEY,
-             phone TEXT,
-             session TEXT,
-             invited_count INTEGER DEFAULT 0,
-             is_active INTEGER DEFAULT 0)''')
+# قاموس لتخزين جلسات المستخدمين النشطين
+active_sessions = {}
 
-c.execute('''CREATE TABLE IF NOT EXISTS invited_users (
-             inviter_id INTEGER,
-             invited_id INTEGER,
-             PRIMARY KEY (inviter_id, invited_id))''')
-
-conn.commit()
-
-# تهيئة عميل البوت
-bot = TelegramClient('session_bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-
-# ============== وظائف مساعدة ==============
-async def is_subscribed(user_id):
-    """التحقق من اشتراك المستخدم في القنوات الإجبارية"""
-    for channel in MANDATORY_CHANNELS:
-        try:
-            # الحصول على معلومات القناة
-            channel_entity = await bot.get_entity(channel)
-            
-            # التحقق من اشتراك المستخدم
-            await bot(GetParticipantRequest(
-                channel=InputPeerChannel(channel_entity.id, channel_entity.access_hash),
-                participant=user_id
-            ))
-        except UserNotParticipantError:
-            return False
-        except (ValueError, ChannelPrivateError):
-            # طريقة بديلة للتحقق
-            try:
-                participants = await bot.get_participants(channel_entity)
-                if not any(participant.id == user_id for participant in participants):
-                    return False
-            except Exception:
-                return False
-        except Exception as e:
-            print(f"خطأ في التحقق من الاشتراك: {str(e)}")
-            return False
-    return True
-
-def generate_invite_link(user_id):
-    """إنشاء رابط دعوة بالتنسيق المطلوب"""
-    return f"https://t.me/@PIIiII7BOT?start={user_id}"
-
-def get_user(user_id):
-    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    return c.fetchone()
-
-def create_user(user_id):
-    c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-    conn.commit()
-
-def update_invite_count(user_id):
-    c.execute("UPDATE users SET invited_count = invited_count + 1 WHERE user_id=?", (user_id,))
-    conn.commit()
-    # تفعيل الحساب إذا وصل عدد الدعوات إلى 5
-    c.execute("SELECT invited_count FROM users WHERE user_id=?", (user_id,))
-    count = c.fetchone()[0]
-    if count >= 5:
-        c.execute("UPDATE users SET is_active=1 WHERE user_id=?", (user_id,))
-        conn.commit()
-        return True
-    return False
-
-def is_active_user(user_id):
-    c.execute("SELECT is_active FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    return row and row[0] == 1 if row else False
-
-def save_user_session(user_id, phone, session_str):
-    c.execute("UPDATE users SET phone=?, session=?, is_active=1 WHERE user_id=?", 
-             (phone, session_str, user_id))
-    conn.commit()
-
-# ============== معالجة الأحداث ==============
-@bot.on(events.NewMessage(pattern='/start'))
-async def start_handler(event):
-    user_id = event.sender_id
-    args = event.pattern_match.string.split()
-    
-    # إنشاء مستخدم جديد إذا لم يكن موجوداً
-    create_user(user_id)
-    
-    # معالجة رابط الدعوة إذا وجد (التنسيق الجديد)
-    if len(args) > 1 and args[1].isdigit():
-        inviter_id = int(args[1])
-        if user_id != inviter_id:
-            # تجنب تسجيل الدعوة المكررة
-            c.execute("SELECT * FROM invited_users WHERE inviter_id=? AND invited_id=?", (inviter_id, user_id))
-            if not c.fetchone():
-                c.execute("INSERT INTO invited_users (inviter_id, invited_id) VALUES (?, ?)", (inviter_id, user_id))
-                conn.commit()
-                # تحديث عدد الدعوات وتفعيل الحساب إذا لزم الأمر
-                if update_invite_count(inviter_id):
-                    await bot.send_message(inviter_id, "🎉 تم تفعيل حسابك بعدد 5 دعوات!")
-
-    # التحقق من الاشتراك في القنوات
-    if not await is_subscribed(user_id):
-        await event.respond(
-            "**⚠️ يجب الاشتراك في القنوات التالية أولاً:**\n" +
-            "\n".join([f"• @{channel}" for channel in MANDATORY_CHANNELS]) +
-            "\n\nبعد الاشتراك، أعد استخدام الأمر /start"
-        )
-        return
-
-    # التحقق من تفعيل الحساب
-    if not is_active_user(user_id):
-        invite_link = generate_invite_link(user_id)
-        c.execute("SELECT invited_count FROM users WHERE user_id=?", (user_id,))
-        count = c.fetchone()[0]
-        
-        await event.respond(
-            f"**🔒 يجب دعوة 5 أشخاص لتفعيل حسابك**\n"
-            f"**عدد المدعوين الحالي:** {count}/5\n"
-            f"**رابط الدعوة الخاص بك:** {invite_link}\n\n"
-            "قم بمشاركة رابط الدعوة أعلاه مع أصدقائك. "
-            "بعد دعوة 5 أشخاص، سيتم تفعيل حسابك تلقائياً."
-        )
-        return
-    
-    # إذا كان الحساب مفعلاً - عرض خيار تسجيل الدخول
-    await event.respond(
-        "**✅ تم تفعيل حسابك بنجاح!**\n"
-        "يمكنك الآن تسجيل الدخول لحفظ جلسة التلجرام.",
-        buttons=[Button.inline("تسجيل الدخول", b"login")]
+# handler لبدء البوت
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("تسجيل الحساب", callback_data='login')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        'مرحباً! أنا بوت لإدارة جلسات التلجرام. '
+        'اضغط على الزر أدناه لبدء تسجيل الدخول إلى حسابك.',
+        reply_markup=reply_markup
     )
 
-@bot.on(events.CallbackQuery(data=b"login"))
-async def login_handler(event):
-    user_id = event.sender_id
+# handler لزر Inline
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    # التحقق من تفعيل الحساب
-    if not is_active_user(user_id):
-        await event.respond("⚠️ يجب تفعيل حسابك أولاً بدعوة 5 أشخاص")
+    if query.data == 'login':
+        user_id = query.from_user.id
+        user_sessions[user_id] = {'step': 'phone'}
+        await query.edit_message_text(
+            "يرجى إرسال رقم هاتفك مع رمز الدولة (مثال: +1234567890):"
+        )
+
+# handler لمعالجة الرسائل
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if user_id not in user_sessions:
         return
     
-    # بدء عملية تسجيل الدخول
-    async with bot.conversation(user_id) as conv:
-        await conv.send_message("📱 الرجاء إرسال رقم هاتفك (مع رمز الدولة):")
-        phone_response = await conv.get_response()
-        phone = phone_response.text.strip()
-        
-        # إرسال كود التحقق
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
-        await client.connect()
-        
-        try:
-            sent = await client.send_code_request(phone)
-        except PhoneNumberInvalidError:
-            await event.respond("❌ رقم الهاتف غير صالح")
-            return
-        except FloodWaitError as e:
-            await event.respond(f"⏳ تم حظرك مؤقتاً، يرجى الانتظار {e.seconds} ثانية")
-            return
-        
-        await conv.send_message("🔢 أرسل كود التحقق (بصيغة 1 2 3 4 5):")
-        code_response = await conv.get_response()
-        code = ''.join(code_response.text.strip().split())
-        
-        try:
-            await client.sign_in(phone, code=code)
-        except SessionPasswordNeededError:
-            await conv.send_message("🔑 الحساب محمي بكلمة مرور. أرسل كلمة المرور:")
-            password_response = await conv.get_response()
-            await client.sign_in(password=password_response.text.strip())
-        except Exception as e:
-            await event.respond(f"❌ خطأ في التسجيل: {str(e)}")
-            return
-        
-        # حفظ الجلسة
-        session_str = client.session.save()
-        save_user_session(user_id, phone, session_str)
-        
-        await event.respond(
-            "✅ تم تسجيل الدخول بنجاح!\n"
-            f"**رقم الهاتف:** `{phone}`\n"
-            f"**جلسة التلجرام:**\n`{session_str}`"
+    session_data = user_sessions[user_id]
+    
+    if session_data['step'] == 'phone':
+        # حفظ رقم الهاتف والانتقال لخطوة الرمز
+        session_data['phone'] = update.message.text
+        session_data['step'] = 'code'
+        await update.message.reply_text(
+            "تم استلام رقم الهاتف. يرجى إرسال رمز التحقق الذي تلقيته على التلجرام."
         )
-        await client.disconnect()
+    
+    elif session_data['step'] == 'code':
+        # حفظ الرمز ومحاولة تسجيل الدخول
+        session_data['code'] = update.message.text
+        await update.message.reply_text("جاري محاولة تسجيل الدخول...")
+        
+        # إنشاء جلسة جديدة
+        session = StringSession()
+        client = TelegramClient(session, API_ID, API_HASH)
+        
+        try:
+            await client.start(
+                phone=lambda: session_data['phone'],
+                code=lambda: session_data['code']
+            )
+            
+            # حفظ الجلسة النشطة
+            active_sessions[user_id] = {
+                'client': client,
+                'session_string': session.save()
+            }
+            
+            await update.message.reply_text(
+                "✅ تم تسجيل الدخول بنجاح!\n"
+                f"مفتاح الجلسة: `{session.save()}`\n\n"
+                "يمكنك الآن استخدام الأوامر الأخرى للتفاعل مع حسابك.",
+                parse_mode='Markdown'
+            )
+            
+            # تنظيف بيانات الجلسة المؤقتة
+            del user_sessions[user_id]
+            
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ فشل تسجيل الدخول: {str(e)}\n"
+                "يرجى المحاولة مرة أخرى."
+            )
+            # تنظيف البيانات في حالة الفشل
+            if user_id in user_sessions:
+                del user_sessions[user_id]
 
-# ============== تشغيل البوت ==============
-if __name__ == "__main__":
-    print("تم تشغيل البوت بنجاح!")
-    bot.run_until_disconnected()
+# handler لعرض معلومات الحساب
+async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if user_id not in active_sessions:
+        await update.message.reply_text("ليس لديك جلسة نشطة. يرجى تسجيل الدخول أولاً.")
+        return
+    
+    try:
+        client = active_sessions[user_id]['client']
+        me = await client.get_me()
+        await update.message.reply_text(
+            f"معلومات الحساب:\n\n"
+            f"الاسم: {me.first_name}\n"
+            f"اسم العائلة: {me.last_name or 'غير معروف'}\n"
+            f"اسم المستخدم: @{me.username or 'غير معروف'}\n"
+            f"ID: {me.id}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"حدث خطأ: {str(e)}")
+
+# handler لإنهاء الجلسة
+async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if user_id not in active_sessions:
+        await update.message.reply_text("ليس لديك جلسة نشطة.")
+        return
+    
+    try:
+        client = active_sessions[user_id]['client']
+        await client.disconnect()
+        del active_sessions[user_id]
+        await update.message.reply_text("✅ تم تسجيل الخروج بنجاح.")
+    except Exception as e:
+        await update.message.reply_text(f"حدث خطأ أثناء تسجيل الخروج: {str(e)}")
+
+# الدالة الرئيسية
+def main():
+    # إنشاء Application الخاص بالبوت
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # إضافة handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("me", me))
+    application.add_handler(CommandHandler("logout", logout))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # بدء البوت
+    print("البوت يعمل...")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
