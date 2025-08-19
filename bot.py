@@ -11,7 +11,7 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError, ChatWrit
 # إعدادات البوت
 API_ID = 23656977
 API_HASH = '49d3f43531a92b3f5bc403766313ca1e'
-BOT_TOKEN = '7966976239:AAHyzY1KwJBWdVncELgl-O9VMFZoav6smZM'
+BOT_TOKEN = '8110119856:AAGtC5c8oQ1CA_FpGPQD0zg4ZArPunYSwr4'
 MANDATORY_CHANNELS = ['crazys7', 'AWU87']
 ADMIN_ID = 0  # ضع هنا آيدي المدير (رقمك)
 
