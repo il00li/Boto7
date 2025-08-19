@@ -69,7 +69,7 @@ async def is_subscribed(user_id):
 
 def generate_invite_link(user_id):
     """إنشاء رابط دعوة بالتنسيق المطلوب"""
-    return f"https://t.me/SMSMEGbot?start={user_id}"
+    return f"https://t.me/@PIIiII7BOT?start={user_id}"
 
 def get_user(user_id):
     c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
