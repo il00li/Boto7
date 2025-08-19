@@ -13,7 +13,7 @@ from telethon.tl.types import InputPeerChannel
 # إعدادات البوت
 API_ID = 23656977
 API_HASH = '49d3f43531a92b3f5bc403766313ca1e'
-BOT_TOKEN = '7917959495:AAFobh74Ped4Ffn7GaH9XSNQmiZtJnkLdMY'
+BOT_TOKEN = '7917959495:AAH1jcUheiXoxRjPuKfXoUOyK2uPDu53lEE'
 MANDATORY_CHANNELS = ['crazys7', 'AWU87']  # القنوات الإجبارية
 
 # إعداد قاعدة البيانات
@@ -41,7 +41,7 @@ bot = TelegramClient('session_bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 # ============== وظائف مساعدة ==============
 async def is_subscribed(user_id):
-    """التحقق من اشتراك المستخدم في القنوات الإجبارية (محدثة)"""
+    """التحقق من اشتراك المستخدم في القنوات الإجبارية"""
     for channel in MANDATORY_CHANNELS:
         try:
             # الحصول على معلومات القناة
@@ -55,9 +55,8 @@ async def is_subscribed(user_id):
         except UserNotParticipantError:
             return False
         except (ValueError, ChannelPrivateError):
-            # إذا لم يكن البوت مشرفاً أو حدث خطأ
+            # طريقة بديلة للتحقق
             try:
-                # طريقة بديلة للتحقق
                 participants = await bot.get_participants(channel_entity)
                 if not any(participant.id == user_id for participant in participants):
                     return False
@@ -69,8 +68,8 @@ async def is_subscribed(user_id):
     return True
 
 def generate_invite_link(user_id):
-    """إنشاء رابط دعوة فريد"""
-    return f"https://t.me/{BOT_TOKEN.split(':')[0]}?start=invite_{user_id}"
+    """إنشاء رابط دعوة بالتنسيق المطلوب"""
+    return f"https://t.me/SMSMEGbot?start={user_id}"
 
 def get_user(user_id):
     c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
@@ -111,9 +110,9 @@ async def start_handler(event):
     # إنشاء مستخدم جديد إذا لم يكن موجوداً
     create_user(user_id)
     
-    # معالجة رابط الدعوة إذا وجد
-    if len(args) > 1 and args[1].startswith('invite_'):
-        inviter_id = int(args[1].split('_')[1])
+    # معالجة رابط الدعوة إذا وجد (التنسيق الجديد)
+    if len(args) > 1 and args[1].isdigit():
+        inviter_id = int(args[1])
         if user_id != inviter_id:
             # تجنب تسجيل الدعوة المكررة
             c.execute("SELECT * FROM invited_users WHERE inviter_id=? AND invited_id=?", (inviter_id, user_id))
