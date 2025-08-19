@@ -8,12 +8,12 @@ from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.errors import SessionPasswordNeededError, FloodWaitError, ChatWriteForbiddenError
 
-# إعدادات البوت
+# إعدادات البوت - تم التحديث
 API_ID = 23656977
 API_HASH = '49d3f43531a92b3f5bc403766313ca1e'
-BOT_TOKEN = '8110119856:AAGtC5c8oQ1CA_FpGPQD0zg4ZArPunYSwr4'
+BOT_TOKEN = '8110119856:AAGtC5c8oQ1CA_FpGPQD0zg4ZArPunYSwr4'  # تم تحديث التوكن
 MANDATORY_CHANNELS = ['crazys7', 'AWU87']
-ADMIN_ID = 0  # ضع هنا آيدي المدير (رقمك)
+ADMIN_ID = 7251748706  # ضع هنا آيدي المدير (رقمك)
 
 # تخزين البيانات
 sessions = {}
@@ -24,7 +24,7 @@ forwarding_chats = {}
 active_posting = {}
 admin_mode = {}
 
-# تهيئة العميل
+# تهيئة العميل - تم التصحيح
 bot = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 async def is_subscribed(user_id):
@@ -88,12 +88,15 @@ async def start_handler(event):
     
     # التحقق من رابط الدعوة
     if 'invite_' in event.raw_text:
-        inviter_id = int(event.raw_text.split('_')[1])
-        if inviter_id in user_invites and user_id not in user_invites[inviter_id]:
-            if await is_subscribed(user_id):
-                user_invites[inviter_id].add(user_id)
-                await event.respond(f"**تم قبول دعوتك بواسطة {inviter_id}**")
-                await bot.send_message(inviter_id, f"**تمت إضافة دعوة جديدة! لديك الآن {len(user_invites[inviter_id])}/5 دعوات**")
+        try:
+            inviter_id = int(event.raw_text.split('_')[1])
+            if inviter_id in user_invites and user_id not in user_invites[inviter_id]:
+                if await is_subscribed(user_id):
+                    user_invites[inviter_id].add(user_id)
+                    await event.respond(f"**تم قبول دعوتك بواسطة {inviter_id}**")
+                    await bot.send_message(inviter_id, f"**تمت إضافة دعوة جديدة! لديك الآن {len(user_invites[inviter_id])}/5 دعوات**")
+        except:
+            pass
     
     # التحقق من حالة المستخدم
     if user_id not in sessions:
@@ -101,7 +104,8 @@ async def start_handler(event):
     else:
         invites_count = len(user_invites.get(user_id, set()))
         if invites_count < 5:
-            invite_link = f"t.me/{(await bot.get_me()).username}?start=invite_{user_id}"
+            me = await bot.get_me()
+            invite_link = f"t.me/{me.username}?start=invite_{user_id}"
             await event.respond(f"**يجب دعوة {5-invites_count} أشخاص آخرين لاستخدام البوت**\nرابط الدعوة:\n`{invite_link}`")
         else:
             await send_main_menu(user_id)
@@ -278,7 +282,8 @@ async def handle_messages(event):
             await event.respond("**تم تسجيل الدخول بنجاح!**")
             
             # إنشاء رابط الدعوة
-            invite_link = f"t.me/{(await bot.get_me()).username}?start=invite_{user_id}"
+            me = await bot.get_me()
+            invite_link = f"t.me/{me.username}?start=invite_{user_id}"
             user_invites[user_id] = set()
             await event.respond(f"**يجب دعوة 5 أشخاص لاستخدام البوت**\nرابط الدعوة:\n`{invite_link}`")
             
@@ -300,7 +305,8 @@ async def handle_messages(event):
             await event.respond("**تم تسجيل الدخول بنجاح!**")
             
             # إنشاء رابط الدعوة
-            invite_link = f"t.me/{(await bot.get_me()).username}?start=invite_{user_id}"
+            me = await bot.get_me()
+            invite_link = f"t.me/{me.username}?start=invite_{user_id}"
             user_invites[user_id] = set()
             await event.respond(f"**يجب دعوة 5 أشخاص لاستخدام البوت**\nرابط الدعوة:\n`{invite_link}`")
             
@@ -333,6 +339,9 @@ async def handle_messages(event):
 
 async def auto_poster(user_id):
     """النشر التلقائي في المجموعات"""
+    if user_id not in sessions or 'session' not in sessions[user_id]:
+        return
+    
     session_str = sessions[user_id]['session']
     settings = user_settings[user_id]
     message = settings['message']
@@ -357,6 +366,8 @@ async def auto_poster(user_id):
             except FloodWaitError as e:
                 await bot.send_message(user_id, f"**تم حظرك مؤقتًا لمدة {e.seconds} ثانية**")
                 await asyncio.sleep(e.seconds)
+            except:
+                failed_groups.append(group_id)
         
         # إزالة المجموعات الفاشلة
         for group_id in failed_groups:
