@@ -17,7 +17,7 @@ API_HASH = '49d3f43531a92b3f5bc403766313ca1e'
 BOT_TOKEN = '8324471840:AAEX2W5x02F-NKZTt7qM0NNovrrF-gFRBsU'
 
 # إعدادات المدير
-ADMIN_IDS = [123456789]  # استبدل بأرقام هويات المديرين
+ADMIN_IDS = [6689435577]  # استبدل بأرقام هويات المديرين
 
 # إعدادات الملفات
 USERS_FILE = 'users.json'
