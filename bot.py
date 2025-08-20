@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 from datetime import datetime, timedelta
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError, ChannelInvalidError, ChatWriteForbiddenError
@@ -199,6 +200,7 @@ async def start_publishing(user_id):
                 
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
+                logger.info(f"Publishing loop for user {user_id} was cancelled")
                 break
             except Exception as e:
                 logger.error(f"Error in publishing loop: {str(e)}")
@@ -743,73 +745,126 @@ async def admin_broadcast(event, message):
 
 # مهمة دورية للتحقق من انتهاء الصلاحية
 async def check_subscriptions():
-    while True:
-        await asyncio.sleep(24 * 60 * 60)  # الانتظار لمدة 24 ساعة
-        
-        now = datetime.now()
-        expired_users = []
-        
-        for user_id, user_data in users_data.items():
-            if is_subscription_active(user_data):
-                expiry_date = datetime.strptime(user_data['subscription']['expiry_date'], '%Y-%m-%d')
-                days_remaining = (expiry_date - now).days
-                
-                if days_remaining == 3:
-                    # إرسال تنبيه قبل 3 أيام من انتهاء الصلاحية
-                    try:
-                        await bot.send_message(int(user_id), f"⚠️ اشتراكك سينتهي خلال {days_remaining} أيام. يرجى التواصل مع المدير لتجديد الاشتراك.")
-                    except Exception as e:
-                        logger.error(f"Failed to send expiry warning to {user_id}: {str(e)}")
-                
-                if expiry_date < now:
-                    # انتهاء الصلاحية
-                    user_data['subscription']['active'] = False
-                    save_user_data(int(user_id), user_data)
-                    expired_users.append(user_id)
+    try:
+        while True:
+            await asyncio.sleep(24 * 60 * 60)  # الانتظار لمدة 24 ساعة
+            
+            now = datetime.now()
+            expired_users = []
+            
+            for user_id, user_data in users_data.items():
+                if is_subscription_active(user_data):
+                    expiry_date = datetime.strptime(user_data['subscription']['expiry_date'], '%Y-%m-%d')
+                    days_remaining = (expiry_date - now).days
                     
-                    # إيقاف النشر إذا كان نشطًا
-                    if int(user_id) in active_tasks:
-                        await stop_publishing(int(user_id))
+                    if days_remaining == 3:
+                        # إرسال تنبيه قبل 3 أيام من انتهاء الصلاحية
+                        try:
+                            await bot.send_message(int(user_id), f"⚠️ اشتراكك سينتهي خلال {days_remaining} أيام. يرجى التواصل مع المدير لتجديد الاشتراك.")
+                        except Exception as e:
+                            logger.error(f"Failed to send expiry warning to {user_id}: {str(e)}")
                     
-                    try:
-                        await bot.send_message(int(user_id), "❌ انتهت صلاحية اشتراكك. يرجى التواصل مع المدير لتجديد الاشتراك.")
-                    except Exception as e:
-                        logger.error(f"Failed to send expiry notice to {user_id}: {str(e)}")
-        
-        # إرسال تقرير دوري للمدير
-        active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data))
-        total_posts = sum(data.get('statistics', {}).get('total_posts', 0) for data in users_data.values())
-        expired_codes = sum(1 for code, data in codes_data.items() 
-                           if 'expiry_date' in data and datetime.strptime(data['expiry_date'], '%Y-%m-%d') < datetime.now())
-        
-        report_msg = (
-            f"📊 التقرير الدوري:\n"
-            f"- المستخدمون النشطون: {active_users}\n"
-            f"- إجمالي المنشورات: {total_posts}\n"
-            f"- الأكواد المنتهية: {expired_codes}\n"
-            f"- المستخدمون المنتهية صلاحيتهم: {len(expired_users)}"
-        )
-        
+                    if expiry_date < now:
+                        # انتهاء الصلاحية
+                        user_data['subscription']['active'] = False
+                        save_user_data(int(user_id), user_data)
+                        expired_users.append(user_id)
+                        
+                        # إيقاف النشر إذا كان نشطًا
+                        if int(user_id) in active_tasks:
+                            await stop_publishing(int(user_id))
+                        
+                        try:
+                            await bot.send_message(int(user_id), "❌ انتهت صلاحية اشتراكك. يرجى التواصل مع المدير لتجديد الاشتراك.")
+                        except Exception as e:
+                            logger.error(f"Failed to send expiry notice to {user_id}: {str(e)}")
+            
+            # إرسال تقرير دوري للمدير
+            active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data))
+            total_posts = sum(data.get('statistics', {}).get('total_posts', 0) for data in users_data.values())
+            expired_codes = sum(1 for code, data in codes_data.items() 
+                               if 'expiry_date' in data and datetime.strptime(data['expiry_date'], '%Y-%m-%d') < datetime.now())
+            
+            report_msg = (
+                f"📊 التقرير الدوري:\n"
+                f"- المستخدمون النشطون: {active_users}\n"
+                f"- إجمالي المنشورات: {total_posts}\n"
+                f"- الأكواد المنتهية: {expired_codes}\n"
+                f"- المستخدمون المنتهية صلاحيتهم: {len(expired_users)}"
+            )
+            
+            try:
+                await bot.send_message(ADMIN_ID, report_msg)
+            except Exception as e:
+                logger.error(f"Failed to send report to admin: {str(e)}")
+    except asyncio.CancelledError:
+        logger.info("Subscription check task was cancelled")
+        raise
+
+# إعداد معالجات الإشارات للإغلاق النظيف
+def setup_signal_handlers():
+    loop = asyncio.get_event_loop()
+    
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
+
+async def shutdown():
+    logger.info("Shutting down...")
+    
+    # إلغاء جميع مهام النشر النشطة
+    for user_id, task in active_tasks.items():
+        task.cancel()
         try:
-            await bot.send_message(ADMIN_ID, report_msg)
-        except Exception as e:
-            logger.error(f"Failed to send report to admin: {str(e)}")
+            await task
+        except asyncio.CancelledError:
+            pass
+    
+    # فصل جميع عملاء المستخدمين
+    for user_id, client in user_clients.items():
+        await client.disconnect()
+    
+    # حفظ البيانات
+    save_data(users_data, USERS_FILE)
+    save_data(codes_data, CODES_FILE)
+    
+    # إيقاف البوت
+    await bot.disconnect()
+    
+    logger.info("Bot shut down successfully")
 
 # بدء البوت والمهام الدورية
 async def main():
-    # بدء مهمة التحقق من الصلاحية
-    asyncio.create_task(check_subscriptions())
+    # إعداد معالجات الإشارات
+    setup_signal_handlers()
     
-    # تشغيل البوت
-    await bot.start()
-    await bot.run_until_disconnected()
+    # بدء مهمة التحقق من الصلاحية
+    subscription_task = asyncio.create_task(check_subscriptions())
+    
+    try:
+        # تشغيل البوت
+        await bot.start(bot_token=BOT_TOKEN)
+        logger.info("Bot started successfully")
+        await bot.run_until_disconnected()
+    except asyncio.CancelledError:
+        logger.info("Bot was cancelled")
+    finally:
+        # إلغاء مهمة التحقق من الصلاحية
+        subscription_task.cancel()
+        try:
+            await subscription_task
+        except asyncio.CancelledError:
+            pass
+        
+        # التأكد من أن البوت متوقف
+        if bot.is_connected():
+            await bot.disconnect()
 
 if __name__ == '__main__':
-    # استخدام حلقة asyncio الحالية بدلاً من إنشاء حلقة جديدة
-    loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(main())
+        asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
     finally:
-        loop.close() 
+        logger.info("Bot has been terminated") 
