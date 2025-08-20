@@ -144,6 +144,34 @@ async def auto_posting_task(user_id):
             logger.error(f"Error in auto_posting_task for user {user_id}: {e}")
             break
 
+# دالة للتحقق من انتهاء الاشتراكات دورياً
+async def check_expired_subscriptions():
+    while True:
+        try:
+            now = datetime.now()
+            expired_users = []
+            
+            for user_id, expiry_date in USER_SUBSCRIPTIONS.items():
+                if expiry_date < now:
+                    expired_users.append(user_id)
+            
+            # إرسال تقرير للمدير
+            if expired_users and ADMIN_IDS:
+                for admin_id in ADMIN_IDS:
+                    try:
+                        # نحتاج إلى طريقة لإرسال الرسائل بدون context
+                        # سنقوم بتخزين الرسائل وإرسالها لاحقاً
+                        logger.info(f"📊 تقرير الاشتراكات المنتهية: {len(expired_users)}")
+                    except Exception as e:
+                        logger.error(f"Error sending report to admin: {e}")
+            
+            # الانتظار 24 ساعة قبل التحقق مرة أخرى
+            await asyncio.sleep(86400)  # 24 ساعة
+                
+        except Exception as e:
+            logger.error(f"Error in subscription check: {e}")
+            await asyncio.sleep(3600)  # الانتظار ساعة واحدة قبل إعادة المحاولة
+
 # handler لبدء البوت
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -586,6 +614,7 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     # إذا كان المستخدم مديراً، لا داعي للتحقق
     if is_admin(user_id):
+        await start(update, context)
         return
     
     # إذا لم يكن لديه اشتراك فعال، طلب كود التفعيل
@@ -600,39 +629,8 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # إذا كان لديه اشتراك فعال، متابعة إلى البداية
     await start(update, context)
 
-# دالة للتحقق من انتهاء الاشتراكات دورياً
-async def check_expired_subscriptions(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now()
-    expired_users = []
-    
-    for user_id, expiry_date in USER_SUBSCRIPTIONS.items():
-        if expiry_date < now:
-            expired_users.append(user_id)
-            
-            # إرسال تنبيه للمستخدم
-            try:
-                await context.bot.send_message(
-                    user_id,
-                    "⚠️ انتهت صلاحية اشتراكك!\n\n"
-                    "يرجى التواصل مع المدير لتجديد الاشتراك."
-                )
-            except:
-                pass
-    
-    # إرسال تقرير للمدير
-    if expired_users and ADMIN_IDS:
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_message(
-                    admin_id,
-                    f"📊 تقرير الاشتراكات المنتهية:\n\n"
-                    f"عدد المستخدمين المنتهية صلاحيتهم: {len(expired_users)}"
-                )
-            except:
-                pass
-
 # الدالة الرئيسية
-def main():
+async def main():
     # إنشاء Application الخاص بالبوت
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -641,13 +639,13 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # إضافة مهمة دورية للتحقق من الاشتراكات المنتهية (يومياً)
-    # نستخدم job_queue من application بعد بنائه
-    application.job_queue.run_repeating(check_expired_subscriptions, interval=86400, first=10)
+    # بدء مهمة التحقق من الاشتراكات المنتهية
+    asyncio.create_task(check_expired_subscriptions())
     
     # بدء البوت
     print("🤖 بوت النشر التلقائي يعمل الآن...")
-    application.run_polling()
+    await application.run_polling()
 
 if __name__ == '__main__':
-    main()
+    # تشغيل الدالة الرئيسية
+    asyncio.run(main())
