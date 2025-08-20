@@ -2,10 +2,10 @@ import asyncio
 import json
 import os
 import re
+import signal
 from datetime import datetime, timedelta
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError, ChannelInvalidError, ChatWriteForbiddenError
-from telethon.tl.types import Message, User, Channel, Chat
 import logging
 
 # تكوين logging
@@ -31,13 +31,19 @@ CODES_FILE = os.path.join(DATA_DIR, 'codes.json')
 # نحمل بيانات المستخدمين والأكواد
 def load_data(filename):
     if os.path.exists(filename):
-        with open(filename, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return {}
     return {}
 
 def save_data(data, filename):
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Failed to save data to {filename}: {str(e)}")
 
 users_data = load_data(USERS_FILE)
 codes_data = load_data(CODES_FILE)
@@ -48,7 +54,7 @@ user_clients = {}  # لتخزين عملاء Telethon للمستخدمين
 user_states = {}  # لتخزين حالة المستخدم أثناء التفاعل
 
 # إنشاء عميل البوت
-bot = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+bot = TelegramClient('bot', API_ID, API_HASH)
 
 # وظائف المساعدة
 def get_user_data(user_id):
@@ -69,8 +75,11 @@ def save_code_data(code, data):
 def is_subscription_active(user_data):
     sub = user_data.get('subscription', {})
     if sub.get('active') and 'expiry_date' in sub:
-        expiry = datetime.strptime(sub['expiry_date'], '%Y-%m-%d')
-        return expiry > datetime.now()
+        try:
+            expiry = datetime.strptime(sub['expiry_date'], '%Y-%m-%d')
+            return expiry > datetime.now()
+        except ValueError:
+            return False
     return False
 
 # نتحقق من صلاحية الكود
@@ -80,8 +89,11 @@ def is_code_valid(code):
         return False
     
     if not code_data.get('used', False) and 'expiry_date' in code_data:
-        expiry = datetime.strptime(code_data['expiry_date'], '%Y-%m-%d')
-        return expiry > datetime.now()
+        try:
+            expiry = datetime.strptime(code_data['expiry_date'], '%Y-%m-%d')
+            return expiry > datetime.now()
+        except ValueError:
+            return False
     
     return False
 
@@ -150,10 +162,18 @@ async def start_publishing(user_id):
     
     # إيقاف المهمة الحالية إذا كانت تعمل
     if user_id in active_tasks:
-        active_tasks[user_id].cancel()
-        if user_id in user_clients:
+        try:
+            active_tasks[user_id].cancel()
+            await asyncio.sleep(1)  # انتظار قليل للإلغاء
+        except:
+            pass
+        
+    if user_id in user_clients:
+        try:
             await user_clients[user_id].disconnect()
-            del user_clients[user_id]
+        except:
+            pass
+        del user_clients[user_id]
     
     # إنشاء عميل للمستخدم
     try:
@@ -177,12 +197,17 @@ async def start_publishing(user_id):
     
     async def publishing_loop():
         next_publish_time = datetime.now()
-        while user_data.get('is_publishing', False) and is_subscription_active(user_data):
+        while True:
             try:
+                # التحقق من حالة النشر في كل تكرار
+                current_user_data = get_user_data(user_id)
+                if not current_user_data.get('is_publishing', False) or not is_subscription_active(current_user_data):
+                    break
+                
                 # حساب الوقت المتبقي للنشر القادم
                 remaining_time = (next_publish_time - datetime.now()).total_seconds()
                 if remaining_time > 0:
-                    await asyncio.sleep(min(remaining_time, 60))  # الحد الأقصى للنوم 60 ثانية
+                    await asyncio.sleep(min(remaining_time, 60))  # التحقق كل دقيقة كحد أقصى
                     continue
                 
                 # النشر
@@ -192,17 +217,20 @@ async def start_publishing(user_id):
                 next_publish_time = datetime.now() + timedelta(seconds=interval)
                 
                 # إرسال تقرير عن النشر
-                await bot.send_message(
-                    user_id, 
-                    f"✅ تم النشر في {successful_posts} من أصل {total_groups} مجموعة.\n"
-                    f"⏰ النشر القادم: {next_publish_time.strftime('%H:%M:%S')}"
-                )
+                try:
+                    await bot.send_message(
+                        user_id, 
+                        f"✅ تم النشر في {successful_posts} من أصل {total_groups} مجموعة.\n"
+                        f"⏰ النشر القادم: {next_publish_time.strftime('%H:%M:%S')}"
+                    )
+                except:
+                    pass  # تجاهل الأخطاء في إرسال التقارير
                 
-                await asyncio.sleep(interval)
+                await asyncio.sleep(1)  # فاصل قصير بين الدورات
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in publishing loop: {str(e)}")
+                logger.error(f"Error in publishing loop for user {user_id}: {str(e)}")
                 await asyncio.sleep(60)  # الانتظار لمدة دقيقة قبل إعادة المحاولة
     
     task = asyncio.create_task(publishing_loop())
@@ -219,11 +247,18 @@ async def start_publishing(user_id):
 
 async def stop_publishing(user_id):
     if user_id in active_tasks:
-        active_tasks[user_id].cancel()
+        try:
+            active_tasks[user_id].cancel()
+            await asyncio.sleep(1)  # انتظار قليل للإلغاء
+        except:
+            pass
         del active_tasks[user_id]
     
     if user_id in user_clients:
-        await user_clients[user_id].disconnect()
+        try:
+            await user_clients[user_id].disconnect()
+        except:
+            pass
         del user_clients[user_id]
     
     user_data = get_user_data(user_id)
@@ -305,7 +340,10 @@ async def show_main_menu(event):
         interval = user_data.get('settings', {}).get('interval', 300)
         message += f"\n\nالنشر نشط ✅\nالفاصل الزمني: {interval//60} دقائق"
     
-    await event.edit(message, buttons=buttons) if hasattr(event, 'edit') else await event.reply(message, buttons=buttons)
+    try:
+        await event.edit(message, buttons=buttons)
+    except:
+        await event.reply(message, buttons=buttons)
 
 async def show_account_settings(event):
     user_id = event.sender_id
@@ -600,7 +638,10 @@ async def handle_activation_code(event, code):
     save_user_data(user_id, user_data)
     
     # إرسال إشعار للمدير
-    await bot.send_message(ADMIN_ID, f'✅ تم تفعيل اشتراك جديد للمستخدم {user_id} باستخدام الكود {code}.')
+    try:
+        await bot.send_message(ADMIN_ID, f'✅ تم تفعيل اشتراك جديد للمستخدم {user_id} باستخدام الكود {code}.')
+    except:
+        pass  # تجاهل فشل إرسال الإشعار للمدير
     
     await event.reply('✅ تم تفعيل اشتراكك بنجاح! يمكنك الآن استخدام البوت.')
     await show_main_menu(event)
@@ -670,7 +711,10 @@ async def delete_account(event):
     # حذف ملف الجلسة
     user_data = get_user_data(user_id)
     if user_data and 'session_file' in user_data and os.path.exists(user_data['session_file']):
-        os.remove(user_data['session_file'])
+        try:
+            os.remove(user_data['session_file'])
+        except:
+            pass
     
     # حذف بيانات المستخدم
     if str(user_id) in users_data:
@@ -694,7 +738,10 @@ async def admin_ban_user(event, user_id):
         await stop_publishing(user_id)
     
     await event.reply(f'✅ تم حظر المستخدم {user_id}.')
-    await bot.send_message(user_id, '❌ تم حظر حسابك من استخدام البوت.')
+    try:
+        await bot.send_message(user_id, '❌ تم حظر حسابك من استخدام البوت.')
+    except:
+        pass  # تجاهل فشل إرسال الرسالة للمستخدم
 
 async def admin_unban_user(event, user_id):
     user_data = get_user_data(user_id)
@@ -706,7 +753,10 @@ async def admin_unban_user(event, user_id):
     save_user_data(user_id, user_data)
     
     await event.reply(f'✅ تم فك حظر المستخدم {user_id}.')
-    await bot.send_message(user_id, '✅ تم فك حظر حسابك. يمكنك الآن استخدام البوت مرة أخرى.')
+    try:
+        await bot.send_message(user_id, '✅ تم فك حظر حسابك. يمكنك الآن استخدام البوت مرة أخرى.')
+    except:
+        pass  # تجاهل فشل إرسال الرسالة للمستخدم
 
 async def admin_delete_user(event, user_id):
     user_data = get_user_data(user_id)
@@ -720,7 +770,10 @@ async def admin_delete_user(event, user_id):
     
     # حذف ملف الجلسة
     if 'session_file' in user_data and os.path.exists(user_data['session_file']):
-        os.remove(user_data['session_file'])
+        try:
+            os.remove(user_data['session_file'])
+        except:
+            pass
     
     # حذف بيانات المستخدم
     if str(user_id) in users_data:
@@ -737,6 +790,7 @@ async def admin_broadcast(event, message):
         try:
             await bot.send_message(int(user_id), f"📢 إشعار من المدير:\n\n{message}")
             sent_count += 1
+            await asyncio.sleep(0.1)  # تجنب القيود
         except Exception as e:
             logger.error(f"Failed to send broadcast to {user_id}: {str(e)}")
     
@@ -746,76 +800,121 @@ async def admin_broadcast(event, message):
 async def check_subscriptions():
     while True:
         try:
-            await asyncio.sleep(24 * 60 * 60)  # الانتظار لمدة 24 ساعة
+            await asyncio.sleep(3600)  # الانتظار لمدة ساعة بين الفحوصات
             
             now = datetime.now()
             expired_users = []
             
-            for user_id, user_data in users_data.items():
-                if is_subscription_active(user_data):
-                    expiry_date = datetime.strptime(user_data['subscription']['expiry_date'], '%Y-%m-%d')
-                    days_remaining = (expiry_date - now).days
-                    
-                    if days_remaining == 3:
-                        # إرسال تنبيه قبل 3 أيام من انتهاء الصلاحية
-                        try:
-                            await bot.send_message(int(user_id), f"⚠️ اشتراكك سينتهي خلال {days_remaining} أيام. يرجى التواصل مع المدير لتجديد الاشتراك.")
-                        except Exception as e:
-                            logger.error(f"Failed to send expiry warning to {user_id}: {str(e)}")
-                    
-                    if expiry_date < now:
-                        # انتهاء الصلاحية
-                        user_data['subscription']['active'] = False
-                        save_user_data(int(user_id), user_data)
-                        expired_users.append(user_id)
+            for user_id, user_data in list(users_data.items()):
+                try:
+                    if is_subscription_active(user_data):
+                        expiry_date = datetime.strptime(user_data['subscription']['expiry_date'], '%Y-%m-%d')
+                        days_remaining = (expiry_date - now).days
                         
-                        # إيقاف النشر إذا كان نشطًا
-                        if int(user_id) in active_tasks:
-                            await stop_publishing(int(user_id))
+                        if days_remaining == 3:
+                            # إرسال تنبيه قبل 3 أيام من انتهاء الصلاحية
+                            try:
+                                await bot.send_message(int(user_id), f"⚠️ اشتراكك سينتهي خلال {days_remaining} أيام. يرجى التواصل مع المدير لتجديد الاشتراك.")
+                            except Exception as e:
+                                logger.error(f"Failed to send expiry warning to {user_id}: {str(e)}")
                         
-                        try:
-                            await bot.send_message(int(user_id), "❌ انتهت صلاحية اشتراكك. يرجى التواصل مع المدير لتجديد الاشتراك.")
-                        except Exception as e:
-                            logger.error(f"Failed to send expiry notice to {user_id}: {str(e)}")
+                        if expiry_date < now:
+                            # انتهاء الصلاحية
+                            user_data['subscription']['active'] = False
+                            save_user_data(int(user_id), user_data)
+                            expired_users.append(user_id)
+                            
+                            # إيقاف النشر إذا كان نشطًا
+                            if int(user_id) in active_tasks:
+                                await stop_publishing(int(user_id))
+                            
+                            try:
+                                await bot.send_message(int(user_id), "❌ انتهت صلاحية اشتراكك. يرجى التواصل مع المدير لتجديد الاشتراك.")
+                            except Exception as e:
+                                logger.error(f"Failed to send expiry notice to {user_id}: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Error checking subscription for user {user_id}: {str(e)}")
             
-            # إرسال تقرير دوري للمدير
-            active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data))
-            total_posts = sum(data.get('statistics', {}).get('total_posts', 0) for data in users_data.values())
-            expired_codes = sum(1 for code, data in codes_data.items() 
-                               if 'expiry_date' in data and datetime.strptime(data['expiry_date'], '%Y-%m-%d') < datetime.now())
-            
-            report_msg = (
-                f"📊 التقرير الدوري:\n"
-                f"- المستخدمون النشطون: {active_users}\n"
-                f"- إجمالي المنشورات: {total_posts}\n"
-                f"- الأكواد المنتهية: {expired_codes}\n"
-                f"- المستخدمون المنتهية صلاحيتهم: {len(expired_users)}"
-            )
-            
-            try:
-                await bot.send_message(ADMIN_ID, report_msg)
-            except Exception as e:
-                logger.error(f"Failed to send report to admin: {str(e)}")
+            # إرسال تقرير دوري للمدير (مرة واحدة في اليوم)
+            if now.hour == 9:  # الساعة 9 صباحًا
+                active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data))
+                total_posts = sum(data.get('statistics', {}).get('total_posts', 0) for data in users_data.values())
+                expired_codes = sum(1 for code, data in codes_data.items() 
+                                   if 'expiry_date' in data and datetime.strptime(data['expiry_date'], '%Y-%m-%d') < datetime.now())
+                
+                report_msg = (
+                    f"📊 التقرير الدوري:\n"
+                    f"- المستخدمون النشطون: {active_users}\n"
+                    f"- إجمالي المنشورات: {total_posts}\n"
+                    f"- الأكواد المنتهية: {expired_codes}\n"
+                    f"- المستخدمون المنتهية صلاحيتهم: {len(expired_users)}"
+                )
+                
+                try:
+                    await bot.send_message(ADMIN_ID, report_msg)
+                except Exception as e:
+                    logger.error(f"Failed to send report to admin: {str(e)}")
         except Exception as e:
-            logger.error(f"Error in subscription check: {str(e)}")
-            await asyncio.sleep(3600)  # الانتظار ساعة واحدة عند حدوث خطأ
+            logger.error(f"Error in subscription check task: {str(e)}")
+            await asyncio.sleep(3600)  # الانتظار ساعة أخرى عند حدوث خطأ
+
+# معالجة الإشارات للإغلاق النظيف
+async def shutdown():
+    # إلغاء جميع المهام النشطة
+    for task in asyncio.all_tasks():
+        if task is not asyncio.current_task():
+            task.cancel()
+    
+    # إغلاق جميع عملاء المستخدمين
+    for client in user_clients.values():
+        try:
+            await client.disconnect()
+        except:
+            pass
+    
+    # إلغاء جميع مهام النشر النشطة
+    for task in active_tasks.values():
+        try:
+            task.cancel()
+        except:
+            pass
+    
+    try:
+        await bot.disconnect()
+    except:
+        pass
 
 # بدء البوت والمهام الدورية
 async def main():
     # بدء مهمة التحقق من الصلاحية
-    asyncio.ensure_future(check_subscriptions())
+    subscription_task = asyncio.create_task(check_subscriptions())
     
-    # تشغيل البوت
-    await bot.run_until_disconnected()
-
-if __name__ == '__main__':
-    # إنشاء حلقة أحداث جديدة
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # معالجة الإشارات للإغلاق النظيف
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
     
     try:
-        loop.run_until_complete(main())
+        # تشغيل البوت
+        await bot.start()
+        await bot.run_until_disconnected()
+    except Exception as e:
+        logger.error(f"Bot error: {str(e)}")
+    finally:
+        # التأكد من إغلاق جميع الاتصالات
+        subscription_task.cancel()
+        try:
+            await subscription_task
+        except asyncio.CancelledError:
+            pass
+        
+        await shutdown()
+
+if __name__ == '__main__':
+    # استخدام طريقة آمنة لتشغيل البوت
+    try:
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
-    finally:
-        loop.close()
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}") 
