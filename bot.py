@@ -1,688 +1,807 @@
 import asyncio
-import logging
 import json
 import os
 import re
-import random
-import string
-import threading
-import time
 from datetime import datetime, timedelta
-from telethon import TelegramClient
-from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError
-import telebot
-from telebot import types
+from telethon import TelegramClient, events, Button
+from telethon.errors import SessionPasswordNeededError, ChannelInvalidError, ChatWriteForbiddenError
+from telethon.tl.types import Message, User, Channel, Chat
+import logging
 
 # تكوين logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# بيانات API
+# إعدادات البوت
 API_ID = 23656977
 API_HASH = '49d3f43531a92b3f5bc403766313ca1e'
 BOT_TOKEN = '8324471840:AAEX2W5x02F-NKZTt7qM0NNovrrF-gFRBsU'
+ADMIN_ID = 6689435577  # معرف المدير
 
-# إنشاء كائن البوت
-bot = telebot.TeleBot(BOT_TOKEN)
-
-# إعدادات المدير
-ADMIN_IDS = [7251748706]  # أيدي المدير
-ACTIVATION_CODES = {}  # ستخزن أكواد التفعيل {code: {user_id, expiry_date}}
-USER_SUBSCRIPTIONS = {}  # ستخزن اشتراكات المستخدمين {user_id: expiry_date}
-
-# هياكل البيانات
-user_sessions = {}  # جلسات المستخدمين النشطة
-user_settings = {}  # إعدادات المستخدمين
-auto_posting_tasks = {}  # مهام النشر التلقائي
-user_stats = {}  # إحصائيات المستخدمين
-
-# مسارات الملفات
-SESSIONS_DIR = "sessions"
-SETTINGS_DIR = "settings"
+# مجلدات البيانات
+SESSIONS_DIR = 'sessions'
+DATA_DIR = 'data'
 os.makedirs(SESSIONS_DIR, exist_ok=True)
-os.makedirs(SETTINGS_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# دالة للتحقق إذا كان المستخدم مديراً
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
+# ملفات البيانات
+USERS_FILE = os.path.join(DATA_DIR, 'users.json')
+CODES_FILE = os.path.join(DATA_DIR, 'codes.json')
 
-# دالة للتحقق من صلاحية الاشتراك
-def is_subscription_active(user_id):
-    if user_id in USER_SUBSCRIPTIONS:
-        return USER_SUBSCRIPTIONS[user_id] > datetime.now()
+# نحمل بيانات المستخدمين والأكواد
+def load_data(filename):
+    if os.path.exists(filename):
+        with open(filename, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_data(data, filename):
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+users_data = load_data(USERS_FILE)
+codes_data = load_data(CODES_FILE)
+
+# نحتاج لتخزين المهام النشطة للنشر التلقائي لكل مستخدم
+active_tasks = {}
+user_clients = {}  # لتخزين عملاء Telethon للمستخدمين
+user_states = {}  # لتخزين حالة المستخدم أثناء التفاعل
+
+# إنشاء عميل البوت
+bot = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+
+# وظائف المساعدة
+def get_user_data(user_id):
+    return users_data.get(str(user_id), {})
+
+def save_user_data(user_id, data):
+    users_data[str(user_id)] = data
+    save_data(users_data, USERS_FILE)
+
+def get_code_data(code):
+    return codes_data.get(code, {})
+
+def save_code_data(code, data):
+    codes_data[code] = data
+    save_data(codes_data, CODES_FILE)
+
+# نتحقق من صلاحية اشتراك المستخدم
+def is_subscription_active(user_data):
+    sub = user_data.get('subscription', {})
+    if sub.get('active') and 'expiry_date' in sub:
+        expiry = datetime.strptime(sub['expiry_date'], '%Y-%m-%d')
+        return expiry > datetime.now()
     return False
 
-# دالة لتحميل إعدادات المستخدم
-def load_user_settings(user_id):
-    settings_file = os.path.join(SETTINGS_DIR, f"{user_id}.json")
-    if os.path.exists(settings_file):
-        with open(settings_file, 'r') as f:
-            return json.load(f)
-    return {"message": "", "interval": 5, "active": False}
-
-# دالة لحفظ إعدادات المستخدم
-def save_user_settings(user_id, settings):
-    settings_file = os.path.join(SETTINGS_DIR, f"{user_id}.json")
-    with open(settings_file, 'w') as f:
-        json.dump(settings, f)
-
-# دالة لتحميل جلسة المستخدم
-def load_user_session(user_id):
-    session_file = os.path.join(SESSIONS_DIR, f"{user_id}.session")
-    if os.path.exists(session_file):
-        with open(session_file, 'r') as f:
-            return f.read().strip()
-    return None
-
-# دالة لحفظ جلسة المستخدم
-def save_user_session(user_id, session_string):
-    session_file = os.path.join(SESSIONS_DIR, f"{user_id}.session")
-    with open(session_file, 'w') as f:
-        f.write(session_string)
-
-# دالة لحذف حساب المستخدم
-def delete_user_account(user_id):
-    # حذف الجلسة
-    session_file = os.path.join(SESSIONS_DIR, f"{user_id}.session")
-    if os.path.exists(session_file):
-        os.remove(session_file)
+# نتحقق من صلاحية الكود
+def is_code_valid(code):
+    code_data = get_code_data(code)
+    if not code_data:
+        return False
     
-    # حذف الإعدادات
-    settings_file = os.path.join(SETTINGS_DIR, f"{user_id}.json")
-    if os.path.exists(settings_file):
-        os.remove(settings_file)
+    if not code_data.get('used', False) and 'expiry_date' in code_data:
+        expiry = datetime.strptime(code_data['expiry_date'], '%Y-%m-%d')
+        return expiry > datetime.now()
     
-    # إيقاف النشر إذا كان نشطاً
-    if user_id in auto_posting_tasks:
-        auto_posting_tasks[user_id].cancel()
-        del auto_posting_tasks[user_id]
+    return False
+
+# توليد كود تفعيل جديد
+def generate_activation_code(duration_days=30):
+    import random
+    import string
     
-    # حذف من الذاكرة
-    if user_id in user_sessions:
-        del user_sessions[user_id]
-    if user_id in user_settings:
-        del user_settings[user_id]
-    if user_id in user_stats:
-        del user_stats[user_id]
-
-# دالة النشر التلقائي
-async def auto_posting_task(user_id):
-    while user_id in user_settings and user_settings[user_id].get("active", False):
-        try:
-            client = user_sessions[user_id]["client"]
-            settings = user_settings[user_id]
-            message = settings["message"]
-            
-            # الحصول على جميع الدردشات والمجموعات
-            dialogs = await client.get_dialogs()
-            
-            # النشر في المجموعات والقنوات فقط (لا الدردشات الخاصة)
-            for dialog in dialogs:
-                if dialog.is_group or dialog.is_channel:
-                    try:
-                        await client.send_message(dialog.id, message)
-                        
-                        # تحديث الإحصائيات
-                        if user_id not in user_stats:
-                            user_stats[user_id] = {"posts": 0, "groups": set()}
-                        
-                        user_stats[user_id]["posts"] += 1
-                        user_stats[user_id]["groups"].add(dialog.id)
-                        
-                        await asyncio.sleep(5)  # تأخير بين الرسائل لتجنب الحظر
-                    except Exception as e:
-                        logger.error(f"Error posting in {dialog.id}: {e}")
-                        continue
-            
-            # الانتظار للفاصل الزمني المحدد
-            interval = settings.get("interval", 5)
-            for i in range(interval * 60):
-                if not user_settings[user_id].get("active", False):
-                    break
-                await asyncio.sleep(1)
-                
-        except Exception as e:
-            logger.error(f"Error in auto_posting_task for user {user_id}: {e}")
-            break
-
-# دالة للتحقق من انتهاء الاشتراكات دورياً
-def check_expired_subscriptions():
-    while True:
-        try:
-            now = datetime.now()
-            expired_users = []
-            
-            for user_id, expiry_date in USER_SUBSCRIPTIONS.items():
-                if expiry_date < now:
-                    expired_users.append(user_id)
-                    
-                    # إرسال تنبيه للمستخدم
-                    try:
-                        bot.send_message(
-                            user_id,
-                            "⚠️ انتهت صلاحية اشتراكك!\n\n"
-                            "يرجى التواصل مع المدير لتجديد الاشتراك."
-                        )
-                    except Exception as e:
-                        logger.error(f"Error sending message to user {user_id}: {e}")
-            
-            # إرسال تقرير للمدير
-            if expired_users and ADMIN_IDS:
-                for admin_id in ADMIN_IDS:
-                    try:
-                        bot.send_message(
-                            admin_id,
-                            f"📊 تقرير الاشتراكات المنتهية:\n\n"
-                            f"عدد المستخدمين المنتهية صلاحيتهم: {len(expired_users)}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Error sending report to admin {admin_id}: {e}")
-            
-            # الانتظار 24 ساعة قبل التحقق مرة أخرى
-            time.sleep(86400)  # 24 ساعة
-                
-        except Exception as e:
-            logger.error(f"Error in subscription check: {e}")
-            time.sleep(3600)  # الانتظار ساعة واحدة قبل إعادة المحاولة
-
-# بدء خيط للتحقق من الاشتراكات المنتهية
-subscription_thread = threading.Thread(target=check_expired_subscriptions, daemon=True)
-subscription_thread.start()
-
-# handler لبدء البوت
-@bot.message_handler(commands=['start'])
-def start(message):
-    user_id = message.from_user.id
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    expiry_date = (datetime.now() + timedelta(days=duration_days)).strftime('%Y-%m-%d')
     
-    # التحقق من وجود اشتراك فعال
-    if not is_subscription_active(user_id):
-        bot.send_message(
-            user_id,
-            "🔒 البوت مدفوع ويتطلب اشتراكاً\n\n"
-            "يجب عليك الحصول على كود تفعيل من المدير لاستخدام البوت.\n"
-            "يرجى التواصل مع المدير للحصول على كود التفعيل."
-        )
+    code_data = {
+        'created_at': datetime.now().strftime('%Y-%m-%d'),
+        'expiry_date': expiry_date,
+        'used': False,
+        'used_by': None,
+        'used_at': None
+    }
+    
+    save_code_data(code, code_data)
+    return code
+
+# وظائف للنشر التلقائي
+async def publish_message(client, user_id, message_text):
+    user_data = get_user_data(user_id)
+    if not user_data or not is_subscription_active(user_data):
         return
     
-    # تحميل إعدادات المستخدم إذا كانت موجودة
-    if user_id not in user_settings:
-        user_settings[user_id] = load_user_settings(user_id)
+    dialogs = await client.get_dialogs()
+    successful_posts = 0
+    total_groups = 0
     
-    # تحميل الجلسة إذا كانت موجودة
-    session_string = load_user_session(user_id)
-    if session_string and user_id not in user_sessions:
-        try:
-            client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
-            asyncio.run(client.connect())
-            if asyncio.run(client.is_user_authorized()):
-                user_sessions[user_id] = {
-                    "client": client,
-                    "session_string": session_string
-                }
-        except Exception as e:
-            logger.error(f"Error loading session for user {user_id}: {e}")
+    for dialog in dialogs:
+        if dialog.is_group or dialog.is_channel:
+            total_groups += 1
+            try:
+                await client.send_message(dialog.id, message_text)
+                successful_posts += 1
+                await asyncio.sleep(1)  # تجنب القيود
+            except (ChannelInvalidError, ChatWriteForbiddenError, ValueError) as e:
+                logger.warning(f"Cannot post in {dialog.id}: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error posting in {dialog.id}: {str(e)}")
     
-    # عرض لوحة التحكم الرئيسية
-    keyboard = types.InlineKeyboardMarkup()
+    # تحديث الإحصائيات
+    user_data = get_user_data(user_id)
+    stats = user_data.get('statistics', {})
+    stats['total_posts'] = stats.get('total_posts', 0) + successful_posts
+    stats['successful_groups'] = stats.get('successful_groups', 0) + successful_posts
+    stats['total_groups'] = total_groups
+    user_data['statistics'] = stats
+    save_user_data(user_id, user_data)
     
-    if user_id in user_sessions:
-        if user_settings[user_id].get("active", False):
-            keyboard.add(types.InlineKeyboardButton("⏹ إيقاف النشر", callback_data='stop_posting'))
-            # حساب الوقت المتبقي للنشر القادم
-            interval = user_settings[user_id].get("interval", 5)
-            next_post = "قريباً"  # يمكن تحسين هذا بحساب الوقت الفعلي
-            status_text = f"🟢 النشر نشط - التالي: {next_post}"
-        else:
-            keyboard.add(types.InlineKeyboardButton("▶️ تشغيل النشر", callback_data='start_posting'))
-            status_text = "🔴 النشر متوقف"
-        
-        keyboard.add(
-            types.InlineKeyboardButton("📝 تعيين الكليشة", callback_data='set_message'),
-            types.InlineKeyboardButton("⏱ تعيين الفاصل", callback_data='set_interval')
-        )
-        keyboard.add(
-            types.InlineKeyboardButton("⚙️ إعداد الحساب", callback_data='account_settings'),
-            types.InlineKeyboardButton("📊 الإحصائيات", callback_data='stats')
-        )
-        keyboard.add(types.InlineKeyboardButton("🚪 تسجيل الخروج", callback_data='logout'))
-    else:
-        keyboard.add(types.InlineKeyboardButton("🔐 تسجيل الدخول", callback_data='login'))
-        status_text = "❌ لا توجد جلسة نشطة"
-    
-    # إضافة أزرار المدير إذا كان المستخدم مديراً
-    if is_admin(user_id):
-        keyboard.add(types.InlineKeyboardButton("👑 لوحة المدير", callback_data='admin_panel'))
-    
-    welcome_text = f"""
-🤖 بوت النشر التلقائي
+    return successful_posts, total_groups
 
-{status_text}
-
-⚙️ الإعدادات الحالية:
-- الكليشة: {user_settings[user_id].get('message', 'غير معينة')[:30] + '...' if user_settings[user_id].get('message') else 'غير معينة'}
-- الفاصل الزمني: {user_settings[user_id].get('interval', 5)} دقائق
-
-📅 انتهاء الاشتراك: {USER_SUBSCRIPTIONS[user_id].strftime('%Y-%m-%d') if user_id in USER_SUBSCRIPTIONS else 'غير معروف'}
-"""
-    bot.send_message(user_id, welcome_text, reply_markup=keyboard)
-
-# handler لأزرار Inline
-@bot.callback_query_handler(func=lambda call: True)
-def button_handler(call):
-    user_id = call.from_user.id
-    bot.answer_callback_query(call.id)
-    
-    # التحقق من صلاحية الاشتراك
-    if not is_subscription_active(user_id) and call.data != 'login':
-        bot.edit_message_text(
-            "انتهت صلاحية اشتراكك. يرجى التواصل مع المدير لتجديده.",
-            user_id,
-            call.message.message_id
-        )
+async def start_publishing(user_id):
+    user_data = get_user_data(user_id)
+    if not user_data or not is_subscription_active(user_data):
+        await bot.send_message(user_id, "❌ ليس لديك اشتراك فعال أو انتهت صلاحيته.")
         return
     
-    if call.data == 'login':
-        user_sessions[user_id] = {'step': 'phone'}
-        bot.edit_message_text(
-            "📱 يرجى إرسال رقم هاتفك مع رمز الدولة:\n"
-            "مثال: +201234567890",
-            user_id,
-            call.message.message_id
-        )
-    
-    elif call.data == 'set_message':
-        user_sessions[user_id] = {'step': 'set_message'}
-        bot.edit_message_text(
-            "📝 يرجى إرسال الكليشة التي تريد نشرها:\n\n"
-            "ملاحظة: لا يسمح بالوسائط (صور، فيديو، روابط)",
-            user_id,
-            call.message.message_id
-        )
-    
-    elif call.data == 'set_interval':
-        user_sessions[user_id] = {'step': 'set_interval'}
-        bot.edit_message_text(
-            "⏱ يرجى إرسال الفاصل الزمني بين النشرات (بالدقائق):\n\n"
-            "الحد الأدنى: 5 دقائق",
-            user_id,
-            call.message.message_id
-        )
-    
-    elif call.data == 'start_posting':
-        if user_id not in user_sessions:
-            bot.edit_message_text(
-                "❌ يجب تسجيل الدخول أولاً!",
-                user_id,
-                call.message.message_id
-            )
-            return
-        
-        user_settings[user_id]["active"] = True
-        save_user_settings(user_id, user_settings[user_id])
-        
-        # بدء مهمة النشر التلقائي
-        auto_posting_tasks[user_id] = asyncio.create_task(auto_posting_task(user_id))
-        
-        bot.edit_message_text(
-            "✅ تم بدء النشر التلقائي بنجاح!\n\n"
-            "سيتم الآن نشر كليشتك في جميع مجموعاتك تلقائياً.",
-            user_id,
-            call.message.message_id
-        )
-    
-    elif call.data == 'stop_posting':
-        user_settings[user_id]["active"] = False
-        save_user_settings(user_id, user_settings[user_id])
-        
-        # إيقاف مهمة النشر إذا كانت نشطة
-        if user_id in auto_posting_tasks:
-            auto_posting_tasks[user_id].cancel()
-            del auto_posting_tasks[user_id]
-        
-        bot.edit_message_text(
-            "⏹ تم إيقاف النشر التلقائي.",
-            user_id,
-            call.message.message_id
-        )
-    
-    elif call.data == 'account_settings':
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(
-            types.InlineKeyboardButton("📝 تغيير الكليشة", callback_data='set_message'),
-            types.InlineKeyboardButton("⏱ تغيير الفاصل", callback_data='set_interval')
-        )
-        keyboard.add(types.InlineKeyboardButton("🗑 حذف الحساب", callback_data='delete_account'))
-        keyboard.add(types.InlineKeyboardButton("↩️ رجوع", callback_data='back_to_main'))
-        
-        bot.edit_message_text(
-            "⚙️ إعدادات الحساب:\n\n"
-            "يمكنك من هنا تعديل إعدادات حسابك أو حذفه بالكامل.",
-            user_id,
-            call.message.message_id,
-            reply_markup=keyboard
-        )
-    
-    elif call.data == 'stats':
-        stats_text = "📊 الإحصائيات:\n\n"
-        
-        if user_id in user_stats:
-            stats = user_stats[user_id]
-            stats_text += f"عدد المنشورات: {stats.get('posts', 0)}\n"
-            stats_text += f"عدد المجموعات: {len(stats.get('groups', set()))}\n"
-        else:
-            stats_text += "لا توجد إحصائيات حتى الآن.\n"
-        
-        # إحصائيات عامة (للمدير فقط)
-        if is_admin(user_id):
-            stats_text += f"\n👥 المستخدمون النشطون: {len(user_sessions)}\n"
-            stats_text += f"📨 إجمالي المنشورات: {sum(s.get('posts', 0) for s in user_stats.values())}\n"
-        
-        bot.edit_message_text(
-            stats_text,
-            user_id,
-            call.message.message_id
-        )
-    
-    elif call.data == 'logout':
-        if user_id in user_sessions:
-            # إيقاف النشر أولاً
-            if user_settings[user_id].get("active", False):
-                user_settings[user_id]["active"] = False
-                save_user_settings(user_id, user_settings[user_id])
-                
-                if user_id in auto_posting_tasks:
-                    auto_posting_tasks[user_id].cancel()
-                    del auto_posting_tasks[user_id]
-            
-            # قطع الاتصال بحساب Telegram
-            asyncio.run(user_sessions[user_id]["client"].disconnect())
-            del user_sessions[user_id]
-            
-            bot.edit_message_text(
-                "✅ تم تسجيل الخروج بنجاح!\n\n"
-                "للعودة مرة أخرى، ستحتاج إلى إدخال كود التفعيل من المدير.",
-                user_id,
-                call.message.message_id
-            )
-        else:
-            bot.edit_message_text(
-                "❌ لا توجد جلسة نشطة لتسجيل الخروج منها.",
-                user_id,
-                call.message.message_id
-            )
-    
-    elif call.data == 'delete_account':
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(
-            types.InlineKeyboardButton("✅ نعم، احذف حسابي", callback_data='confirm_delete'),
-            types.InlineKeyboardButton("❌ لا، إلغاء", callback_data='back_to_main')
-        )
-        
-        bot.edit_message_text(
-            "⚠️ تأكيد حذف الحساب\n\n"
-            "هل أنت متأكد من أنك تريد حذف حسابك بالكامل؟\n"
-            "هذا الإجراء لا يمكن التراجع عنه وسيتم حذف جميع بياناتك.",
-            user_id,
-            call.message.message_id,
-            reply_markup=keyboard
-        )
-    
-    elif call.data == 'confirm_delete':
-        delete_user_account(user_id)
-        bot.edit_message_text(
-            "🗑 تم حذف حسابك بنجاح.\n\n"
-            "شكراً لك على استخدام البوت.",
-            user_id,
-            call.message.message_id
-        )
-    
-    elif call.data == 'back_to_main':
-        start(call.message)
-    
-    elif call.data == 'admin_panel' and is_admin(user_id):
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(types.InlineKeyboardButton("🎟 إنشاء كود تفعيل", callback_data='generate_code'))
-        keyboard.add(types.InlineKeyboardButton("👥 إدارة المستخدمين", callback_data='manage_users'))
-        keyboard.add(types.InlineKeyboardButton("📊 إحصائيات عامة", callback_data='admin_stats'))
-        keyboard.add(types.InlineKeyboardButton("📣 إشعار عام", callback_data='broadcast'))
-        keyboard.add(types.InlineKeyboardButton("↩️ رجوع", callback_data='back_to_main'))
-        
-        bot.edit_message_text(
-            "👑 لوحة تحكم المدير\n\n"
-            "من هنا يمكنك إدارة البوت والمستخدمين.",
-            user_id,
-            call.message.message_id,
-            reply_markup=keyboard
-        )
-    
-    elif call.data == 'generate_code' and is_admin(user_id):
-        # إنشاء كود تفعيل جديد
-        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        expiry_date = datetime.now() + timedelta(days=30)
-        ACTIVATION_CODES[code] = {
-            "created_by": user_id,
-            "expiry_date": expiry_date,
-            "used": False
-        }
-        bot.edit_message_text(
-            f"🎟 تم إنشاء كود التفعيل:\n\n"
-            f"الكود: `{code}`\n"
-            f"صالح حتى: {expiry_date.strftime('%Y-%m-%d')}\n\n"
-            "يمكن للمستخدم استخدام هذا الكود للتفعيل.",
-            user_id,
-            call.message.message_id,
-            parse_mode='Markdown'
-        )
-    
-    elif call.data == 'manage_users' and is_admin(user_id):
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(types.InlineKeyboardButton("🚫 حظر مستخدم", callback_data='ban_user'))
-        keyboard.add(types.InlineKeyboardButton("📞 سحب أرقام", callback_data='withdraw_numbers'))
-        keyboard.add(types.InlineKeyboardButton("↩️ رجوع", callback_data='admin_panel'))
-        
-        bot.edit_message_text(
-            "👥 إدارة المستخدمين\n\n"
-            "من هنا يمكنك حظر المستخدمين أو سحب أرقامهم.",
-            user_id,
-            call.message.message_id,
-            reply_markup=keyboard
-        )
-    
-    elif call.data == 'admin_stats' and is_admin(user_id):
-        stats_text = "📊 الإحصائيات العامة:\n\n"
-        stats_text += f"👥 عدد المستخدمين: {len(user_settings)}\n"
-        stats_text += f"🔢 عدد الجلسات النشطة: {len(user_sessions)}\n"
-        stats_text += f"📨 إجمالي المنشورات: {sum(s.get('posts', 0) for s in user_stats.values())}\n"
-        
-        # عدد الأكواد المنتهية الصلاحية
-        expired_codes = sum(1 for code in ACTIVATION_CODES.values() 
-                           if code['expiry_date'] < datetime.now() or code['used'])
-        stats_text += f"🎟 الأكواد المنتهية: {expired_codes}\n"
-        
-        bot.edit_message_text(
-            stats_text,
-            user_id,
-            call.message.message_id
-        )
-    
-    elif call.data == 'broadcast' and is_admin(user_id):
-        user_sessions[user_id] = {'step': 'broadcast_message'}
-        bot.edit_message_text(
-            "📣 إشعار عام\n\n"
-            "أرسل الرسالة التي تريد إرسالها لجميع المستخدمين:",
-            user_id,
-            call.message.message_id
-        )
-
-# handler لمعالجة الرسائل النصية
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    user_id = message.from_user.id
-    text = message.text
-    
-    if user_id not in user_sessions or 'step' not in user_sessions[user_id]:
+    session_name = user_data.get('session_file')
+    if not session_name or not os.path.exists(session_name):
+        await bot.send_message(user_id, "❌ لم تقم بتسجيل جلسة بعد. استخدم زر 'تسجيل' أولاً.")
         return
     
-    step = user_sessions[user_id]['step']
+    # إيقاف المهمة الحالية إذا كانت تعمل
+    if user_id in active_tasks:
+        active_tasks[user_id].cancel()
+        if user_id in user_clients:
+            await user_clients[user_id].disconnect()
+            del user_clients[user_id]
     
-    if step == 'phone':
-        # التحقق من صحة رقم الهاتف
-        if not re.match(r'^\+\d{8,15}$', text):
-            bot.send_message(user_id, "❌ رقم الهاتف غير صحيح. يرجى إرسال رقم صحيح مع رمز الدولة.")
-            return
-        
-        user_sessions[user_id]['phone'] = text
-        user_sessions[user_id]['step'] = 'code'
-        
-        # إنشاء جلسة Telethon جديدة
-        session = StringSession()
-        client = TelegramClient(session, API_ID, API_HASH)
-        asyncio.run(client.connect())
-        
-        # إرسال طلب الكود
-        try:
-            asyncio.run(client.send_code_request(text))
-            user_sessions[user_id]['client'] = client
-            bot.send_message(user_id, "📨 تم إرسال كود التحقق إلى حسابك. يرجى إرسال الكود:")
-        except Exception as e:
-            bot.send_message(user_id, f"❌ خطأ في إرسال الكود: {str(e)}")
-            del user_sessions[user_id]
+    # إنشاء عميل للمستخدم
+    try:
+        client = TelegramClient(session_name, API_ID, API_HASH)
+        await client.start()
+        user_clients[user_id] = client
+    except Exception as e:
+        await bot.send_message(user_id, f"❌ فشل في بدء الجلسة: {str(e)}")
+        return
     
-    elif step == 'code':
-        # محاولة تسجيل الدخول بالكود
-        try:
-            client = user_sessions[user_id]['client']
-            asyncio.run(client.sign_in(user_sessions[user_id]['phone'], text))
-            
-            # حفظ الجلسة
-            session_string = client.session.save()
-            save_user_session(user_id, session_string)
-            user_sessions[user_id]['session_string'] = session_string
-            
-            bot.send_message(user_id, "✅ تم تسجيل الدخول بنجاح!")
-            
-            # العودة إلى القائمة الرئيسية
-            del user_sessions[user_id]['step']
-            start(message)
-            
-        except SessionPasswordNeededError:
-            user_sessions[user_id]['step'] = 'password'
-            bot.send_message(user_id, "🔐 حسابك محمي بكلمة مرور ثنائية. يرجى إرسال كلمة المرور:")
-        except Exception as e:
-            bot.send_message(user_id, f"❌ خطأ في تسجيل الدخول: {str(e)}")
-            del user_sessions[user_id]
+    message_text = user_data.get('settings', {}).get('message', '')
+    interval = user_data.get('settings', {}).get('interval', 300)  # 5 دقائق افتراضيًا
     
-    elif step == 'password':
-        # معالجة كلمة المرور الثنائية
-        try:
-            client = user_sessions[user_id]['client']
-            asyncio.run(client.sign_in(password=text))
-            
-            # حفظ الجلسة
-            session_string = client.session.save()
-            save_user_session(user_id, session_string)
-            user_sessions[user_id]['session_string'] = session_string
-            
-            bot.send_message(user_id, "✅ تم تسجيل الدخول بنجاح!")
-            
-            # العودة إلى القائمة الرئيسية
-            del user_sessions[user_id]['step']
-            start(message)
-            
-        except Exception as e:
-            bot.send_message(user_id, f"❌ خطأ في تسجيل الدخول: {str(e)}")
-            del user_sessions[user_id]
+    if not message_text:
+        await bot.send_message(user_id, "⚠️ لم تقم بتعيين كليشة النشر بعد!")
+        return
     
-    elif step == 'set_message':
-        # حفظ الكليشة
-        user_settings[user_id]['message'] = text
-        save_user_settings(user_id, user_settings[user_id])
-        
-        bot.send_message(user_id, "✅ تم حفظ الكليشة بنجاح!")
-        del user_sessions[user_id]['step']
-        start(message)
+    # تحديث حالة النشر
+    user_data['is_publishing'] = True
+    save_user_data(user_id, user_data)
     
-    elif step == 'set_interval':
-        # التحقق من الفاصل الزمني
-        try:
-            interval = int(text)
-            if interval < 5:
-                bot.send_message(user_id, "❌ الفاصل الزمني يجب أن يكون 5 دقائق على الأقل.")
-                return
-            
-            user_settings[user_id]['interval'] = interval
-            save_user_settings(user_id, user_settings[user_id])
-            
-            bot.send_message(user_id, f"✅ تم تعيين الفاصل الزمني إلى {interval} دقائق.")
-            del user_sessions[user_id]['step']
-            start(message)
-            
-        except ValueError:
-            bot.send_message(user_id, "❌ يرجى إدخال رقم صحيح للفاصل الزمني.")
-    
-    elif step == 'activation_code':
-        # التحقق من كود التفعيل
-        if text in ACTIVATION_CODES:
-            code_data = ACTIVATION_CODES[text]
-            
-            if code_data['expiry_date'] < datetime.now() or code_data['used']:
-                bot.send_message(user_id, "❌ كود التفعيل منتهي الصلاحية أو مستخدم مسبقاً.")
-            else:
-                # تفعيل الاشتراك
-                expiry_date = datetime.now() + timedelta(days=30)
-                USER_SUBSCRIPTIONS[user_id] = expiry_date
-                ACTIVATION_CODES[text]['used'] = True
-                ACTIVATION_CODES[text]['used_by'] = user_id
+    async def publishing_loop():
+        next_publish_time = datetime.now()
+        while user_data.get('is_publishing', False) and is_subscription_active(user_data):
+            try:
+                # حساب الوقت المتبقي للنشر القادم
+                remaining_time = (next_publish_time - datetime.now()).total_seconds()
+                if remaining_time > 0:
+                    await asyncio.sleep(remaining_time)
                 
-                bot.send_message(
-                    user_id,
-                    f"✅ تم تفعيل الاشتراك بنجاح!\n\n"
-                    f"صالح حتى: {expiry_date.strftime('%Y-%m-%d')}"
+                # النشر
+                successful_posts, total_groups = await publish_message(client, user_id, message_text)
+                
+                # تحديث وقت النشر التالي
+                next_publish_time = datetime.now() + timedelta(seconds=interval)
+                
+                # إرسال تقرير عن النشر
+                await bot.send_message(
+                    user_id, 
+                    f"✅ تم النشر في {successful_posts} من أصل {total_groups} مجموعة.\n"
+                    f"⏰ النشر القادم: {next_publish_time.strftime('%H:%M:%S')}"
                 )
                 
-                # إرسال إشعار للمدير
-                for admin_id in ADMIN_IDS:
-                    try:
-                        bot.send_message(
-                            admin_id,
-                            f"🎉 تم تفعيل اشتراك جديد\n\n"
-                            f"المستخدم: {user_id}\n"
-                            f"الكود: {text}\n"
-                            f"الصلاحية: {expiry_date.strftime('%Y-%m-%d')}"
-                        )
-                    except:
-                        pass
-                
-                del user_sessions[user_id]['step']
-                start(message)
-        else:
-            bot.send_message(user_id, "❌ كود التفعيل غير صحيح.")
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in publishing loop: {str(e)}")
+                await asyncio.sleep(60)  # الانتظار لمدة دقيقة قبل إعادة المحاولة
     
-    elif step == 'broadcast_message' and is_admin(user_id):
-        # إرسال إشعار عام لجميع المستخدمين
-        sent = 0
-        failed = 0
-        
-        for uid in user_settings:
-            try:
-                bot.send_message(uid, f"📣 إشعار من المدير:\n\n{text}")
-                sent += 1
-            except:
-                failed += 1
-        
-        bot.send_message(
-            user_id,
-            f"✅ تم إرسال الإشعار:\n\n"
-            f"تم بنجاح: {sent}\n"
-            f"فشل: {failed}"
-        )
-        del user_sessions[user_id]['step']
+    task = asyncio.create_task(publishing_loop())
+    active_tasks[user_id] = task
+    
+    next_publish = datetime.now() + timedelta(seconds=interval)
+    await bot.send_message(
+        user_id, 
+        f"✅ بدأ النشر التلقائي.\n"
+        f"⏰ الفاصل الزمني: {interval//60} دقائق\n"
+        f"📝 الكليشة: {message_text[:50]}...\n"
+        f"⏳ النشر القادم: {next_publish.strftime('%H:%M:%S')}"
+    )
 
-# تشغيل البوت
+async def stop_publishing(user_id):
+    if user_id in active_tasks:
+        active_tasks[user_id].cancel()
+        del active_tasks[user_id]
+    
+    if user_id in user_clients:
+        await user_clients[user_id].disconnect()
+        del user_clients[user_id]
+    
+    user_data = get_user_data(user_id)
+    if user_data:
+        user_data['is_publishing'] = False
+        save_user_data(user_id, user_data)
+    
+    await bot.send_message(user_id, "⏹️ توقف النشر التلقائي.")
+
+# أحداث البوت
+@bot.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
+    user_id = event.sender_id
+    user_data = get_user_data(user_id)
+    
+    # التحقق من صلاحية الاشتراك
+    if not user_data or not is_subscription_active(user_data):
+        buttons = [
+            [Button.inline('تسجيل', 'register')],
+            [Button.inline('إدخال كود التفعيل', 'enter_code')]
+        ]
+        await event.reply('مرحبًا! يبدو أنك لم تسجل بعد أو أن اشتراكك منتهي. اختر أحد الخيارات:', buttons=buttons)
+    else:
+        await show_main_menu(event)
+
+@bot.on(events.CallbackQuery)
+async def callback_handler(event):
+    data = event.data.decode('utf-8')
+    user_id = event.sender_id
+    
+    if data == 'register':
+        await start_registration(event)
+    elif data == 'enter_code':
+        user_states[user_id] = 'waiting_for_code'
+        await event.edit('أرسل كود التفعيل الذي حصلت عليه من المدير:')
+    elif data == 'set_message':
+        user_states[user_id] = 'waiting_for_message'
+        await event.edit('أرسل الكليشة التي تريد نشرها:')
+    elif data == 'set_interval':
+        user_states[user_id] = 'waiting_for_interval'
+        await event.edit('أرسل الفاصل الزمني بين النشرات بالدقائق (الحد الأدنى 5 دقائق):')
+    elif data == 'start_publishing':
+        await start_publishing(user_id)
+    elif data == 'stop_publishing':
+        await stop_publishing(user_id)
+    elif data == 'account_settings':
+        await show_account_settings(event)
+    elif data == 'statistics':
+        await show_statistics(event)
+    elif data == 'logout':
+        await logout_user(event)
+    elif data == 'back':
+        await show_main_menu(event)
+    elif data == 'delete_account':
+        await delete_account(event)
+    elif data == 'admin_panel' and user_id == ADMIN_ID:
+        await show_admin_panel(event)
+    elif data.startswith('admin_'):
+        await handle_admin_actions(event, data)
+
+async def show_main_menu(event):
+    user_id = event.sender_id
+    user_data = get_user_data(user_id)
+    
+    buttons = [
+        [Button.inline('تعيين الكليشة', 'set_message'), Button.inline('تعيين الفاصل', 'set_interval')],
+        [Button.inline('تشغيل النشر', 'start_publishing'), Button.inline('إيقاف النشر', 'stop_publishing')],
+        [Button.inline('إعداد الحساب', 'account_settings'), Button.inline('إحصائيات', 'statistics')],
+        [Button.inline('تسجيل الخروج', 'logout')]
+    ]
+    
+    # إذا كان المدير، نضيف زر المدير
+    if user_id == ADMIN_ID:
+        buttons.append([Button.inline('لوحة المدير', 'admin_panel')])
+    
+    # عرض الوقت المتبقي للنشر القادم إذا كان النشر نشطًا
+    message = "📋 القائمة الرئيسية:"
+    if user_data.get('is_publishing', False):
+        interval = user_data.get('settings', {}).get('interval', 300)
+        message += f"\n\nالنشر نشط ✅\nالفاصل الزمني: {interval//60} دقائق"
+    
+    await event.edit(message, buttons=buttons) if event.is_group else await event.reply(message, buttons=buttons)
+
+async def show_account_settings(event):
+    user_id = event.sender_id
+    user_data = get_user_data(user_id)
+    
+    message_text = user_data.get('settings', {}).get('message', 'لم يتم تعيين كليشة بعد')
+    interval = user_data.get('settings', {}).get('interval', 300) // 60  # التحويل إلى دقائق
+    
+    buttons = [
+        [Button.inline('تغيير الكليشة', 'set_message')],
+        [Button.inline('تغيير الفاصل الزمني', 'set_interval')],
+        [Button.inline('حذف الحساب', 'delete_account')],
+        [Button.inline('رجوع', 'back')]
+    ]
+    
+    await event.edit(
+        f"⚙️ إعدادات الحساب:\n\n📝 الكليشة: {message_text[:100]}{'...' if len(message_text) > 100 else ''}\n⏰ الفاصل الزمني: {interval} دقائق", 
+        buttons=buttons
+    )
+
+async def show_statistics(event):
+    user_id = event.sender_id
+    user_data = get_user_data(user_id)
+    stats = user_data.get('statistics', {})
+    
+    total_posts = stats.get('total_posts', 0)
+    successful_groups = stats.get('successful_groups', 0)
+    total_groups = stats.get('total_groups', 0)
+    
+    message = f"📊 إحصائياتك:\n\n- إجمالي المنشورات: {total_posts}\n- المجموعات الناجحة: {successful_groups}\n- إجمالي المجموعات: {total_groups}"
+    
+    if user_id == ADMIN_ID:
+        # إحصائيات المدير
+        active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data))
+        total_users = len(users_data)
+        total_codes = len(codes_data)
+        expired_codes = sum(1 for code, data in codes_data.items() 
+                           if 'expiry_date' in data and datetime.strptime(data['expiry_date'], '%Y-%m-%d') < datetime.now())
+        
+        message += f"\n\n👑 إحصائيات المدير:\n- المستخدمون النشطون: {active_users}\n- إجمالي المستخدمين: {total_users}\n- إجمالي الأكواد: {total_codes}\n- الأكواد المنتهية: {expired_codes}"
+    
+    await event.edit(message, buttons=[[Button.inline('رجوع', 'back')]])
+
+async def show_admin_panel(event):
+    buttons = [
+        [Button.inline('توليد كود تفعيل', 'admin_generate_code')],
+        [Button.inline('حظر مستخدم', 'admin_ban_user')],
+        [Button.inline('فك حظر مستخدم', 'admin_unban_user')],
+        [Button.inline('حذف مستخدم', 'admin_delete_user')],
+        [Button.inline('إشعار عام', 'admin_broadcast')],
+        [Button.inline('سحب رقم', 'admin_pull_number')],
+        [Button.inline('رجوع', 'back')]
+    ]
+    
+    await event.edit("👑 لوحة تحكم المدير:", buttons=buttons)
+
+async def handle_admin_actions(event, action):
+    user_id = event.sender_id
+    
+    if action == 'admin_generate_code':
+        code = generate_activation_code()
+        await event.edit(f"✅ تم توليد كود التفعيل:\n\n`{code}`\n\nصالح لمدة 30 يومًا")
+    
+    elif action == 'admin_ban_user':
+        user_states[user_id] = 'admin_waiting_ban_user'
+        await event.edit("أرسل معرف المستخدم الذي تريد حظره:")
+    
+    elif action == 'admin_unban_user':
+        user_states[user_id] = 'admin_waiting_unban_user'
+        await event.edit("أرسل معرف المستخدم الذي تريد فك حظره:")
+    
+    elif action == 'admin_delete_user':
+        user_states[user_id] = 'admin_waiting_delete_user'
+        await event.edit("أرسل معرف المستخدم الذي تريد حذفه:")
+    
+    elif action == 'admin_broadcast':
+        user_states[user_id] = 'admin_waiting_broadcast'
+        await event.edit("أرسل الرسالة التي تريد بثها لجميع المستخدمين:")
+    
+    elif action == 'admin_pull_number':
+        await show_user_list(event)
+
+async def show_user_list(event):
+    user_list = []
+    for uid, data in users_data.items():
+        status = "نشط" if is_subscription_active(data) else "غير نشط"
+        user_list.append(f"👤 {uid} - {status}")
+    
+    if not user_list:
+        await event.edit("لا يوجد مستخدمين مسجلين بعد.")
+        return
+    
+    # تقسيم القائمة إلى صفحات
+    pages = [user_list[i:i+10] for i in range(0, len(user_list), 10)]
+    current_page = 0
+    
+    # إنشاء أزرار للتصفح
+    buttons = []
+    if len(pages) > 1:
+        if current_page > 0:
+            buttons.append(Button.inline('السابق', f'admin_page_{current_page-1}'))
+        if current_page < len(pages)-1:
+            buttons.append(Button.inline('التالي', f'admin_page_{current_page+1}'))
+    
+    message = "📋 قائمة المستخدمين:\n\n" + "\n".join(pages[current_page])
+    await event.edit(message, buttons=buttons)
+
+async def start_registration(event):
+    user_id = event.sender_id
+    
+    # التحقق إذا كان المستخدم لديه اشتراك فعال
+    user_data = get_user_data(user_id)
+    if user_data and is_subscription_active(user_data):
+        await event.edit("لديك بالفعل اشتراك فعال!")
+        return
+    
+    user_states[user_id] = 'waiting_for_phone'
+    await event.edit('أرسل رقم هاتفك مع رمز الدولة (مثال: +1234567890):')
+
+@bot.on(events.NewMessage)
+async def message_handler(event):
+    user_id = event.sender_id
+    text = event.text
+    
+    # تجاهل الرسائل في المجموعات
+    if event.is_group:
+        return
+    
+    # معالجة حالات المستخدم المختلفة
+    if user_id in user_states:
+        state = user_states[user_id]
+        
+        if state == 'waiting_for_phone' and re.match(r'^\+\d+$', text):
+            await handle_phone_input(event, text)
+        
+        elif state == 'waiting_for_code' and re.match(r'^\d+$', text) and len(text) == 5:
+            await handle_code_input(event, text)
+        
+        elif state == 'waiting_for_activation_code' and re.match(r'^[A-Z0-9]{10}$', text):
+            await handle_activation_code(event, text)
+        
+        elif state == 'waiting_for_message':
+            await handle_message_input(event, text)
+        
+        elif state == 'waiting_for_interval' and text.isdigit():
+            await handle_interval_input(event, text)
+        
+        elif state == 'waiting_for_password':
+            await handle_password_input(event, text)
+        
+        # معالجة أوامر المدير
+        elif state == 'admin_waiting_ban_user' and text.isdigit():
+            await admin_ban_user(event, int(text))
+        
+        elif state == 'admin_waiting_unban_user' and text.isdigit():
+            await admin_unban_user(event, int(text))
+        
+        elif state == 'admin_waiting_delete_user' and text.isdigit():
+            await admin_delete_user(event, int(text))
+        
+        elif state == 'admin_waiting_broadcast':
+            await admin_broadcast(event, text)
+        
+        else:
+            await event.reply("❌ إدخال غير صحيح. حاول مرة أخرى.")
+        
+        # مسح حالة المستخدم بعد المعالجة
+        if user_id in user_states and not state.startswith('admin_'):
+            del user_states[user_id]
+    
+    # إذا كان المستخدم يدخل كود تفعيل بدون الضغط على الزر أولاً
+    elif re.match(r'^[A-Z0-9]{10}$', text):
+        await handle_activation_code(event, text)
+    
+    # إذا كان المستخدم يرسل رسالة عادية بدون حالة محددة
+    elif not text.startswith('/'):
+        await event.reply("مرحبًا! استخدم /start لبدء التفاعل مع البوت.")
+
+async def handle_phone_input(event, phone):
+    user_id = event.sender_id
+    
+    # إنشاء جلسة جديدة
+    session_name = os.path.join(SESSIONS_DIR, str(user_id))
+    client = TelegramClient(session_name, API_ID, API_HASH)
+    
+    try:
+        await client.connect()
+        sent_code = await client.send_code_request(phone)
+        await event.reply('✅ تم إرسال كود التحقق إلى حسابك. أرسل الكود هنا (5 أرقام):')
+        
+        # حفظ حالة المستخدم للخطوة التالية
+        user_states[user_id] = 'waiting_for_code'
+        user_data = get_user_data(user_id)
+        user_data['registration'] = {
+            'phone': phone,
+            'session_name': session_name,
+            'phone_code_hash': sent_code.phone_code_hash
+        }
+        save_user_data(user_id, user_data)
+        
+    except Exception as e:
+        await event.reply(f'❌ حدث خطأ: {str(e)}')
+        if user_id in user_states:
+            del user_states[user_id]
+
+async def handle_code_input(event, code):
+    user_id = event.sender_id
+    user_data = get_user_data(user_id)
+    
+    if 'registration' not in user_data:
+        await event.reply('❌ لم تبدأ عملية التسجيل بعد. استخدم /start للبدء.')
+        return
+    
+    reg_data = user_data['registration']
+    client = TelegramClient(reg_data['session_name'], API_ID, API_HASH)
+    
+    try:
+        await client.connect()
+        await client.sign_in(reg_data['phone'], code, phone_code_hash=reg_data['phone_code_hash'])
+        
+        # حفظ الجلسة
+        user_data['session_file'] = reg_data['session_name']
+        user_data['phone'] = reg_data['phone']
+        del user_data['registration']
+        save_user_data(user_id, user_data)
+        
+        await event.reply('✅ تم تسجيل الجلسة بنجاح! الآن أرسل كود التفعيل الذي حصلت عليه من المدير.')
+        user_states[user_id] = 'waiting_for_activation_code'
+        
+    except SessionPasswordNeededError:
+        await event.reply('🔐 حسابك محمي بكلمة مرور ثنائية. أرسل كلمة المرور هنا:')
+        user_states[user_id] = 'waiting_for_password'
+    except Exception as e:
+        await event.reply(f'❌ حدث خطأ: {str(e)}')
+        if user_id in user_states:
+            del user_states[user_id]
+
+async def handle_password_input(event, password):
+    user_id = event.sender_id
+    user_data = get_user_data(user_id)
+    
+    if 'registration' not in user_data:
+        await event.reply('❌ لم تبدأ عملية التسجيل بعد. استخدم /start للبدء.')
+        return
+    
+    reg_data = user_data['registration']
+    client = TelegramClient(reg_data['session_name'], API_ID, API_HASH)
+    
+    try:
+        await client.connect()
+        await client.sign_in(password=password)
+        
+        # حفظ الجلسة
+        user_data['session_file'] = reg_data['session_name']
+        user_data['phone'] = reg_data['phone']
+        del user_data['registration']
+        save_user_data(user_id, user_data)
+        
+        await event.reply('✅ تم تسجيل الجلسة بنجاح! الآن أرسل كود التفعيل الذي حصلت عليه من المدير.')
+        user_states[user_id] = 'waiting_for_activation_code'
+        
+    except Exception as e:
+        await event.reply(f'❌ حدث خطأ: {str(e)}')
+        if user_id in user_states:
+            del user_states[user_id]
+
+async def handle_activation_code(event, code):
+    user_id = event.sender_id
+    
+    if not is_code_valid(code):
+        await event.reply('❌ كود التفعيل غير صالح أو منتهي الصلاحية.')
+        return
+    
+    # تفعيل الاشتراك
+    user_data = get_user_data(user_id)
+    expiry_date = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
+    
+    user_data['subscription'] = {
+        'active': True,
+        'expiry_date': expiry_date,
+        'activated_at': datetime.now().strftime('%Y-%m-%d'),
+        'activation_code': code
+    }
+    
+    # تحديث حالة الكود
+    code_data = get_code_data(code)
+    code_data['used'] = True
+    code_data['used_by'] = user_id
+    code_data['used_at'] = datetime.now().strftime('%Y-%m-%d')
+    save_code_data(code, code_data)
+    
+    save_user_data(user_id, user_data)
+    
+    # إرسال إشعار للمدير
+    await bot.send_message(ADMIN_ID, f'✅ تم تفعيل اشتراك جديد للمستخدم {user_id} باستخدام الكود {code}.')
+    
+    await event.reply('✅ تم تفعيل اشتراكك بنجاح! يمكنك الآن استخدام البوت.')
+    await show_main_menu(event)
+
+async def handle_message_input(event, message):
+    user_id = event.sender_id
+    user_data = get_user_data(user_id)
+    
+    if not user_data or not is_subscription_active(user_data):
+        await event.reply('❌ ليس لديك اشتراك فعال.')
+        return
+    
+    if 'settings' not in user_data:
+        user_data['settings'] = {}
+    
+    user_data['settings']['message'] = message
+    save_user_data(user_id, user_data)
+    
+    await event.reply('✅ تم حفظ الكليشة بنجاح!')
+    await show_main_menu(event)
+
+async def handle_interval_input(event, interval):
+    user_id = event.sender_id
+    interval = int(interval)
+    
+    if interval < 5:
+        await event.reply('❌ الحد الأدنى للفاصل الزمني هو 5 دقائق.')
+        return
+    
+    user_data = get_user_data(user_id)
+    
+    if not user_data or not is_subscription_active(user_data):
+        await event.reply('❌ ليس لديك اشتراك فعال.')
+        return
+    
+    if 'settings' not in user_data:
+        user_data['settings'] = {}
+    
+    user_data['settings']['interval'] = interval * 60  # التحويل إلى ثواني
+    save_user_data(user_id, user_data)
+    
+    await event.reply(f'✅ تم تعيين الفاصل الزمني إلى {interval} دقائق!')
+    await show_main_menu(event)
+
+async def logout_user(event):
+    user_id = event.sender_id
+    
+    # إيقاف النشر إذا كان نشطًا
+    if user_id in active_tasks:
+        await stop_publishing(user_id)
+    
+    # مسح بيانات الجلسة
+    user_data = get_user_data(user_id)
+    if user_data:
+        user_data['session_file'] = None
+        save_user_data(user_id, user_data)
+    
+    await event.edit('✅ تم تسجيل الخروج بنجاح. يمكنك العودة في أي وقت بإدخال كود التفعيل من جديد.')
+
+async def delete_account(event):
+    user_id = event.sender_id
+    
+    # إيقاف النشر إذا كان نشطًا
+    if user_id in active_tasks:
+        await stop_publishing(user_id)
+    
+    # حذف ملف الجلسة
+    user_data = get_user_data(user_id)
+    if user_data and 'session_file' in user_data and os.path.exists(user_data['session_file']):
+        os.remove(user_data['session_file'])
+    
+    # حذف بيانات المستخدم
+    if str(user_id) in users_data:
+        del users_data[str(user_id)]
+        save_data(users_data, USERS_FILE)
+    
+    await event.edit('✅ تم حذف حسابك بنجاح.')
+
+# وظائف المدير
+async def admin_ban_user(event, user_id):
+    user_data = get_user_data(user_id)
+    if not user_data:
+        await event.reply('❌ المستخدم غير موجود.')
+        return
+    
+    user_data['banned'] = True
+    save_user_data(user_id, user_data)
+    
+    # إيقاف النشر إذا كان نشطًا
+    if user_id in active_tasks:
+        await stop_publishing(user_id)
+    
+    await event.reply(f'✅ تم حظر المستخدم {user_id}.')
+    await bot.send_message(user_id, '❌ تم حظر حسابك من استخدام البوت.')
+
+async def admin_unban_user(event, user_id):
+    user_data = get_user_data(user_id)
+    if not user_data:
+        await event.reply('❌ المستخدم غير موجود.')
+        return
+    
+    user_data['banned'] = False
+    save_user_data(user_id, user_data)
+    
+    await event.reply(f'✅ تم فك حظر المستخدم {user_id}.')
+    await bot.send_message(user_id, '✅ تم فك حظر حسابك. يمكنك الآن استخدام البوت مرة أخرى.')
+
+async def admin_delete_user(event, user_id):
+    user_data = get_user_data(user_id)
+    if not user_data:
+        await event.reply('❌ المستخدم غير موجود.')
+        return
+    
+    # إيقاف النشر إذا كان نشطًا
+    if user_id in active_tasks:
+        await stop_publishing(user_id)
+    
+    # حذف ملف الجلسة
+    if 'session_file' in user_data and os.path.exists(user_data['session_file']):
+        os.remove(user_data['session_file'])
+    
+    # حذف بيانات المستخدم
+    if str(user_id) in users_data:
+        del users_data[str(user_id)]
+        save_data(users_data, USERS_FILE)
+    
+    await event.reply(f'✅ تم حذف حساب المستخدم {user_id}.')
+
+async def admin_broadcast(event, message):
+    sent_count = 0
+    total_count = len(users_data)
+    
+    for user_id in users_data.keys():
+        try:
+            await bot.send_message(int(user_id), f"📢 إشعار من المدير:\n\n{message}")
+            sent_count += 1
+        except Exception as e:
+            logger.error(f"Failed to send broadcast to {user_id}: {str(e)}")
+    
+    await event.reply(f"✅ تم إرسال الإشعار إلى {sent_count} من أصل {total_count} مستخدم.")
+
+# مهمة دورية للتحقق من انتهاء الصلاحية
+async def check_subscriptions():
+    while True:
+        await asyncio.sleep(24 * 60 * 60)  # الانتظار لمدة 24 ساعة
+        
+        now = datetime.now()
+        expired_users = []
+        
+        for user_id, user_data in users_data.items():
+            if is_subscription_active(user_data):
+                expiry_date = datetime.strptime(user_data['subscription']['expiry_date'], '%Y-%m-%d')
+                days_remaining = (expiry_date - now).days
+                
+                if days_remaining == 3:
+                    # إرسال تنبيه قبل 3 أيام من انتهاء الصلاحية
+                    try:
+                        await bot.send_message(int(user_id), f"⚠️ اشتراكك سينتهي خلال {days_remaining} أيام. يرجى التواصل مع المدير لتجديد الاشتراك.")
+                    except Exception as e:
+                        logger.error(f"Failed to send expiry warning to {user_id}: {str(e)}")
+                
+                if expiry_date < now:
+                    # انتهاء الصلاحية
+                    user_data['subscription']['active'] = False
+                    save_user_data(int(user_id), user_data)
+                    expired_users.append(user_id)
+                    
+                    # إيقاف النشر إذا كان نشطًا
+                    if int(user_id) in active_tasks:
+                        await stop_publishing(int(user_id))
+                    
+                    try:
+                        await bot.send_message(int(user_id), "❌ انتهت صلاحية اشتراكك. يرجى التواصل مع المدير لتجديد الاشتراك.")
+                    except Exception as e:
+                        logger.error(f"Failed to send expiry notice to {user_id}: {str(e)}")
+        
+        # إرسال تقرير دوري للمدير
+        active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data))
+        total_posts = sum(data.get('statistics', {}).get('total_posts', 0) for data in users_data.values())
+        expired_codes = sum(1 for code, data in codes_data.items() 
+                           if 'expiry_date' in data and datetime.strptime(data['expiry_date'], '%Y-%m-%d') < datetime.now())
+        
+        report_msg = (
+            f"📊 التقرير الدوري:\n"
+            f"- المستخدمون النشطون: {active_users}\n"
+            f"- إجمالي المنشورات: {total_posts}\n"
+            f"- الأكواد المنتهية: {expired_codes}\n"
+            f"- المستخدمون المنتهية صلاحيتهم: {len(expired_users)}"
+        )
+        
+        try:
+            await bot.send_message(ADMIN_ID, report_msg)
+        except Exception as e:
+            logger.error(f"Failed to send report to admin: {str(e)}")
+
+# بدء البوت والمهام الدورية
+async def main():
+    # بدء مهمة التحقق من الصلاحية
+    asyncio.create_task(check_subscriptions())
+    
+    # تشغيل البوت
+    await bot.run_until_disconnected()
+
 if __name__ == '__main__':
-    print("🤖 بوت النشر التلقائي يعمل الآن...")
-    bot.infinity_polling()
+    asyncio.run(main()) 
