@@ -3,11 +3,12 @@ import logging
 import json
 import os
 import re
+import random
+import string
 from datetime import datetime, timedelta
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
-from telethon.tl.types import Message
+from telethon.errors import SessionPasswordNeededError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
@@ -370,8 +371,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == 'generate_code' and is_admin(user_id):
         # إنشاء كود تفعيل جديد
-        import random
-        import string
         code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
         expiry_date = datetime.now() + timedelta(days=30)
         ACTIVATION_CODES[code] = {
@@ -643,12 +642,12 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # إضافة مهمة دورية للتحقق من الاشتراكات المنتهية (يومياً)
-    job_queue = application.job_queue
-    job_queue.run_repeating(check_expired_subscriptions, interval=86400, first=10)  # كل 24 ساعة
+    # نستخدم job_queue من application بعد بنائه
+    application.job_queue.run_repeating(check_expired_subscriptions, interval=86400, first=10)
     
     # بدء البوت
     print("🤖 بوت النشر التلقائي يعمل الآن...")
     application.run_polling()
 
 if __name__ == '__main__':
-    main() 
+    main()
