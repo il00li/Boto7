@@ -4,10 +4,9 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
-from telethon.tl.types import Message
+from telethon.errors import SessionPasswordNeededError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
@@ -510,4 +509,145 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == 'set_interval':
         # التحقق من الفاصل الزمني
         try:
-            interval
+            interval = int(text)
+            if interval < 5:
+                await update.message.reply_text("❌ الفاصل الزمني يجب أن يكون 5 دقائق على الأقل.")
+                return
+            
+            user_settings[user_id]['interval'] = interval
+            save_user_settings(user_id, user_settings[user_id])
+            
+            await update.message.reply_text(f"✅ تم تعيين الفاصل الزمني إلى {interval} دقائق.")
+            del user_sessions[user_id]['step']
+            await start(update, context)
+            
+        except ValueError:
+            await update.message.reply_text("❌ يرجى إدخال رقم صحيح للفاصل الزمني.")
+    
+    elif step == 'activation_code':
+        # التحقق من كود التفعيل
+        if text in ACTIVATION_CODES:
+            code_data = ACTIVATION_CODES[text]
+            
+            if code_data['expiry_date'] < datetime.now() or code_data['used']:
+                await update.message.reply_text("❌ كود التفعيل منتهي الصلاحية أو مستخدم مسبقاً.")
+            else:
+                # تفعيل الاشتراك
+                expiry_date = datetime.now() + timedelta(days=30)
+                USER_SUBSCRIPTIONS[user_id] = expiry_date
+                ACTIVATION_CODES[text]['used'] = True
+                ACTIVATION_CODES[text]['used_by'] = user_id
+                
+                await update.message.reply_text(
+                    f"✅ تم تفعيل الاشتراك بنجاح!\n\n"
+                    f"صالح حتى: {expiry_date.strftime('%Y-%m-%d')}"
+                )
+                
+                # إرسال إشعار للمدير
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await context.bot.send_message(
+                            admin_id,
+                            f"🎉 تم تفعيل اشتراك جديد\n\n"
+                            f"المستخدم: {user_id}\n"
+                            f"الكود: {text}\n"
+                            f"الصلاحية: {expiry_date.strftime('%Y-%m-%d')}"
+                        )
+                    except:
+                        pass
+                
+                del user_sessions[user_id]['step']
+                await start(update, context)
+        else:
+            await update.message.reply_text("❌ كود التفعيل غير صحيح.")
+    
+    elif step == 'broadcast_message' and is_admin(user_id):
+        # إرسال إشعار عام لجميع المستخدمين
+        sent = 0
+        failed = 0
+        
+        for uid in user_settings:
+            try:
+                await context.bot.send_message(uid, f"📣 إشعار من المدير:\n\n{text}")
+                sent += 1
+            except:
+                failed += 1
+        
+        await update.message.reply_text(
+            f"✅ تم إرسال الإشعار:\n\n"
+            f"تم بنجاح: {sent}\n"
+            f"فشل: {failed}"
+        )
+        del user_sessions[user_id]['step']
+
+# handler للتحقق من الاشتراك عند بدء المحادثة
+async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    # إذا كان المستخدم مديراً، لا داعي للتحقق
+    if is_admin(user_id):
+        return
+    
+    # إذا لم يكن لديه اشتراك فعال، طلب كود التفعيل
+    if not is_subscription_active(user_id):
+        user_sessions[user_id] = {'step': 'activation_code'}
+        await update.message.reply_text(
+            "🔒 البوت مدفوع ويتطلب اشتراكاً\n\n"
+            "يرجى إرسال كود التفعيل الذي حصلت عليه من المدير:"
+        )
+        return
+    
+    # إذا كان لديه اشتراك فعال، متابعة إلى البداية
+    await start(update, context)
+
+# دالة للتحقق من انتهاء الاشتراكات دورياً
+async def check_expired_subscriptions(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now()
+    expired_users = []
+    
+    for user_id, expiry_date in USER_SUBSCRIPTIONS.items():
+        if expiry_date < now:
+            expired_users.append(user_id)
+            
+            # إرسال تنبيه للمستخدم
+            try:
+                await context.bot.send_message(
+                    user_id,
+                    "⚠️ انتهت صلاحية اشتراكك!\n\n"
+                    "يرجى التواصل مع المدير لتجديد الاشتراك."
+                )
+            except:
+                pass
+    
+    # إرسال تقرير للمدير
+    if expired_users and ADMIN_IDS:
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    admin_id,
+                    f"📊 تقرير الاشتراكات المنتهية:\n\n"
+                    f"عدد المستخدمين المنتهية صلاحيتهم: {len(expired_users)}"
+                )
+            except:
+                pass
+
+# الدالة الرئيسية
+def main():
+    # إنشاء Application الخاص بالبوت
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # إضافة handlers
+    application.add_handler(CommandHandler("start", check_subscription))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # إضافة مهمة دورية للتحقق من الاشتراكات المنتهية (يومياً)
+    job_queue = application.job_queue
+    job_queue.run_repeating(check_expired_subscriptions, interval=86400, first=10)  # كل 24 ساعة
+    
+    # بدء البوت
+    print("🤖 بوت النشر التلقائي يعمل الآن...")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
