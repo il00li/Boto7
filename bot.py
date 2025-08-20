@@ -4,9 +4,10 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.tl.types import Message
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
@@ -650,4 +651,4 @@ def main():
     application.run_polling()
 
 if __name__ == '__main__':
-    main()
+    main() 
