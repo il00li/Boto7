@@ -17,7 +17,6 @@ API_ID = 23656977
 API_HASH = '49d3f43531a92b3f5bc403766313ca1e'
 BOT_TOKEN = '8324471840:AAEX2W5x02F-NKZTt7qM0NNovrrF-gFRBsU'
 ADMIN_ID = 6689435577  # معرف المدير
-ADMIN_USERNAME = '@OlIiIl7'  # معرف المدير
 
 # مجلدات البيانات
 SESSIONS_DIR = 'sessions'
@@ -68,10 +67,6 @@ def save_code_data(code, data):
 
 # نتحقق من صلاحية اشتراك المستخدم
 def is_subscription_active(user_data):
-    # المدير لديه صلاحية دائمة
-    if user_data.get('is_admin', False):
-        return True
-        
     sub = user_data.get('subscription', {})
     if sub.get('active') and 'expiry_date' in sub:
         expiry = datetime.strptime(sub['expiry_date'], '%Y-%m-%d')
@@ -113,7 +108,7 @@ def generate_activation_code(duration_days=30):
 async def publish_message(client, user_id, message_text):
     user_data = get_user_data(user_id)
     if not user_data or not is_subscription_active(user_data):
-        return
+        return 0, 0
     
     dialogs = await client.get_dialogs()
     successful_posts = 0
@@ -187,7 +182,8 @@ async def start_publishing(user_id):
                 # حساب الوقت المتبقي للنشر القادم
                 remaining_time = (next_publish_time - datetime.now()).total_seconds()
                 if remaining_time > 0:
-                    await asyncio.sleep(remaining_time)
+                    await asyncio.sleep(min(remaining_time, 60))  # الحد الأقصى للنوم 60 ثانية
+                    continue
                 
                 # النشر
                 successful_posts, total_groups = await publish_message(client, user_id, message_text)
@@ -241,31 +237,15 @@ async def stop_publishing(user_id):
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     user_id = event.sender_id
-    
-    # إذا كان المدير، نعطيه صلاحيات كاملة
-    if user_id == ADMIN_ID:
-        user_data = get_user_data(user_id)
-        if not user_data:
-            user_data = {'is_admin': True, 'subscription': {'active': True, 'expiry_date': '2099-12-31'}}
-            save_user_data(user_id, user_data)
-        elif not user_data.get('is_admin'):
-            user_data['is_admin'] = True
-            user_data['subscription'] = {'active': True, 'expiry_date': '2099-12-31'}
-            save_user_data(user_id, user_data)
-    
     user_data = get_user_data(user_id)
     
     # التحقق من صلاحية الاشتراك
     if not user_data or not is_subscription_active(user_data):
-        # للمستخدم العادي الذي ليس لديه اشتراك، نعرض فقط خيار إدخال الكود
         buttons = [
+            [Button.inline('تسجيل', 'register')],
             [Button.inline('إدخال كود التفعيل', 'enter_code')]
         ]
-        await event.reply(
-            'مرحبًا! يبدو أنك لم تسجل بعد أو أن اشتراكك منتهي.\n'
-            f'لطلب كود تفعيل، يرجى التواصل مع المدير: {ADMIN_USERNAME}',
-            buttons=buttons
-        )
+        await event.reply('مرحبًا! يبدو أنك لم تسجل بعد أو أن اشتراكك منتهي. اختر أحد الخيارات:', buttons=buttons)
     else:
         await show_main_menu(event)
 
@@ -275,17 +255,10 @@ async def callback_handler(event):
     user_id = event.sender_id
     
     if data == 'register':
-        # إخفاء زر التسجيل عن المستخدمين العاديين
-        if user_id != ADMIN_ID:
-            await event.answer("❌ يجب التواصل مع المدير للحصول على كود تفعيل أولاً.", alert=True)
-            return
         await start_registration(event)
     elif data == 'enter_code':
-        user_states[user_id] = 'waiting_for_activation_code'
-        await event.edit(
-            f'أرسل كود التفعيل الذي حصلت عليه من المدير.\n'
-            f'إذا لم يكن لديك كود، يرجى التواصل مع {ADMIN_USERNAME}'
-        )
+        user_states[user_id] = 'waiting_for_code'
+        await event.edit('أرسل كود التفعيل الذي حصلت عليه من المدير:')
     elif data == 'set_message':
         user_states[user_id] = 'waiting_for_message'
         await event.edit('أرسل الكليشة التي تريد نشرها:')
@@ -315,11 +288,6 @@ async def show_main_menu(event):
     user_id = event.sender_id
     user_data = get_user_data(user_id)
     
-    # إذا كان المستخدم غير مفعل، نعيده إلى بداية التسجيل
-    if not user_data or not is_subscription_active(user_data):
-        await start_handler(event)
-        return
-    
     buttons = [
         [Button.inline('تعيين الكليشة', 'set_message'), Button.inline('تعيين الفاصل', 'set_interval')],
         [Button.inline('تشغيل النشر', 'start_publishing'), Button.inline('إيقاف النشر', 'stop_publishing')],
@@ -330,8 +298,6 @@ async def show_main_menu(event):
     # إذا كان المدير، نضيف زر المدير
     if user_id == ADMIN_ID:
         buttons.append([Button.inline('لوحة المدير', 'admin_panel')])
-        # للمدير فقط، نضيف زر التسجيل
-        buttons.append([Button.inline('تسجيل (للمدير فقط)', 'register')])
     
     # عرض الوقت المتبقي للنشر القادم إذا كان النشر نشطًا
     message = "📋 القائمة الرئيسية:"
@@ -373,7 +339,7 @@ async def show_statistics(event):
     
     if user_id == ADMIN_ID:
         # إحصائيات المدير
-        active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data) and not data.get('is_admin', False))
+        active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data))
         total_users = len(users_data)
         total_codes = len(codes_data)
         expired_codes = sum(1 for code, data in codes_data.items() 
@@ -467,8 +433,6 @@ async def message_handler(event):
     # تجاهل الرسائل في المجموعات
     if event.is_group:
         return
-    
-    logger.info(f"Received message from {user_id}: {text}, state: {user_states.get(user_id, 'no state')}")
     
     # معالجة حالات المستخدم المختلفة
     if user_id in user_states:
@@ -617,9 +581,6 @@ async def handle_activation_code(event, code):
     
     # تفعيل الاشتراك
     user_data = get_user_data(user_id)
-    if not user_data:
-        user_data = {}
-    
     expiry_date = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
     
     user_data['subscription'] = {
@@ -784,68 +745,77 @@ async def admin_broadcast(event, message):
 # مهمة دورية للتحقق من انتهاء الصلاحية
 async def check_subscriptions():
     while True:
-        await asyncio.sleep(24 * 60 * 60)  # الانتظار لمدة 24 ساعة
-        
-        now = datetime.now()
-        expired_users = []
-        
-        for user_id, user_data in users_data.items():
-            # تخطي المدير
-            if user_data.get('is_admin', False):
-                continue
-                
-            if is_subscription_active(user_data):
-                expiry_date = datetime.strptime(user_data['subscription']['expiry_date'], '%Y-%m-%d')
-                days_remaining = (expiry_date - now).days
-                
-                if days_remaining == 3:
-                    # إرسال تنبيه قبل 3 أيام من انتهاء الصلاحية
-                    try:
-                        await bot.send_message(int(user_id), f"⚠️ اشتراكك سينتهي خلال {days_remaining} أيام. يرجى التواصل مع المدير لتجديد الاشتراك.")
-                    except Exception as e:
-                        logger.error(f"Failed to send expiry warning to {user_id}: {str(e)}")
-                
-                if expiry_date < now:
-                    # انتهاء الصلاحية
-                    user_data['subscription']['active'] = False
-                    save_user_data(int(user_id), user_data)
-                    expired_users.append(user_id)
-                    
-                    # إيقاف النشر إذا كان نشطًا
-                    if int(user_id) in active_tasks:
-                        await stop_publishing(int(user_id))
-                    
-                    try:
-                        await bot.send_message(int(user_id), "❌ انتهت صلاحية اشتراكك. يرجى التواصل مع المدير لتجديد الاشتراك.")
-                    except Exception as e:
-                        logger.error(f"Failed to send expiry notice to {user_id}: {str(e)}")
-        
-        # إرسال تقرير دوري للمدير
-        active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data) and not data.get('is_admin', False))
-        total_posts = sum(data.get('statistics', {}).get('total_posts', 0) for data in users_data.values())
-        expired_codes = sum(1 for code, data in codes_data.items() 
-                           if 'expiry_date' in data and datetime.strptime(data['expiry_date'], '%Y-%m-%d') < datetime.now())
-        
-        report_msg = (
-            f"📊 التقرير الدوري:\n"
-            f"- المستخدمون النشطون: {active_users}\n"
-            f"- إجمالي المنشورات: {total_posts}\n"
-            f"- الأكواد المنتهية: {expired_codes}\n"
-            f"- المستخدمون المنتهية صلاحيتهم: {len(expired_users)}"
-        )
-        
         try:
-            await bot.send_message(ADMIN_ID, report_msg)
+            await asyncio.sleep(24 * 60 * 60)  # الانتظار لمدة 24 ساعة
+            
+            now = datetime.now()
+            expired_users = []
+            
+            for user_id, user_data in users_data.items():
+                if is_subscription_active(user_data):
+                    expiry_date = datetime.strptime(user_data['subscription']['expiry_date'], '%Y-%m-%d')
+                    days_remaining = (expiry_date - now).days
+                    
+                    if days_remaining == 3:
+                        # إرسال تنبيه قبل 3 أيام من انتهاء الصلاحية
+                        try:
+                            await bot.send_message(int(user_id), f"⚠️ اشتراكك سينتهي خلال {days_remaining} أيام. يرجى التواصل مع المدير لتجديد الاشتراك.")
+                        except Exception as e:
+                            logger.error(f"Failed to send expiry warning to {user_id}: {str(e)}")
+                    
+                    if expiry_date < now:
+                        # انتهاء الصلاحية
+                        user_data['subscription']['active'] = False
+                        save_user_data(int(user_id), user_data)
+                        expired_users.append(user_id)
+                        
+                        # إيقاف النشر إذا كان نشطًا
+                        if int(user_id) in active_tasks:
+                            await stop_publishing(int(user_id))
+                        
+                        try:
+                            await bot.send_message(int(user_id), "❌ انتهت صلاحية اشتراكك. يرجى التواصل مع المدير لتجديد الاشتراك.")
+                        except Exception as e:
+                            logger.error(f"Failed to send expiry notice to {user_id}: {str(e)}")
+            
+            # إرسال تقرير دوري للمدير
+            active_users = sum(1 for uid, data in users_data.items() if is_subscription_active(data))
+            total_posts = sum(data.get('statistics', {}).get('total_posts', 0) for data in users_data.values())
+            expired_codes = sum(1 for code, data in codes_data.items() 
+                               if 'expiry_date' in data and datetime.strptime(data['expiry_date'], '%Y-%m-%d') < datetime.now())
+            
+            report_msg = (
+                f"📊 التقرير الدوري:\n"
+                f"- المستخدمون النشطون: {active_users}\n"
+                f"- إجمالي المنشورات: {total_posts}\n"
+                f"- الأكواد المنتهية: {expired_codes}\n"
+                f"- المستخدمون المنتهية صلاحيتهم: {len(expired_users)}"
+            )
+            
+            try:
+                await bot.send_message(ADMIN_ID, report_msg)
+            except Exception as e:
+                logger.error(f"Failed to send report to admin: {str(e)}")
         except Exception as e:
-            logger.error(f"Failed to send report to admin: {str(e)}")
+            logger.error(f"Error in subscription check: {str(e)}")
+            await asyncio.sleep(3600)  # الانتظار ساعة واحدة عند حدوث خطأ
 
 # بدء البوت والمهام الدورية
 async def main():
     # بدء مهمة التحقق من الصلاحية
-    asyncio.create_task(check_subscriptions())
+    asyncio.ensure_future(check_subscriptions())
     
     # تشغيل البوت
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # إنشاء حلقة أحداث جديدة
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()
