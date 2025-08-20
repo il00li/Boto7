@@ -1,9 +1,13 @@
 import asyncio
 import logging
+import json
+import os
 import re
-from telethon import TelegramClient
+from datetime import datetime, timedelta
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.tl.types import Message
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
@@ -20,555 +24,490 @@ API_HASH = '49d3f43531a92b3f5bc403766313ca1e'
 BOT_TOKEN = '8324471840:AAEX2W5x02F-NKZTt7qM0NNovrrF-gFRBsU'
 
 # إعدادات المدير
-ADMIN_IDS = [7251748706]  # تم تحديثه بأيدي المدير
-BOT_MODE = "free"  # free أو paid
+ADMIN_IDS = [7251748706]  # أيدي المدير
+ACTIVATION_CODES = {}  # ستخزن أكواد التفعيل {code: {user_id, expiry_date}}
+USER_SUBSCRIPTIONS = {}  # ستخزن اشتراكات المستخدمين {user_id: expiry_date}
 
-# قوائم الحظر والإدارة
-banned_users = set()
-user_sessions = {}
-active_sessions = {}
+# هياكل البيانات
+user_sessions = {}  # جلسات المستخدمين النشطة
+user_settings = {}  # إعدادات المستخدمين
+auto_posting_tasks = {}  # مهام النشر التلقائي
+user_stats = {}  # إحصائيات المستخدمين
 
-# إيموجي للمؤشرات
-EMOJI_SPINNER = ["🔄", "⏳", "📡", "⚡", "🌐", "📶"]
-
-# دالة لتنظيف الرمز من المسافات والأحرف غير الرقمية
-def clean_code(input_code):
-    return re.sub(r'[^0-9]', '', input_code)
+# مسارات الملفات
+SESSIONS_DIR = "sessions"
+SETTINGS_DIR = "settings"
+os.makedirs(SESSIONS_DIR, exist_ok=True)
+os.makedirs(SETTINGS_DIR, exist_ok=True)
 
 # دالة للتحقق إذا كان المستخدم مديراً
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
-# دالة للتحقق إذا كان المستخدم محظوراً
-def is_banned(user_id):
-    return user_id in banned_users
+# دالة للتحقق من صلاحية الاشتراك
+def is_subscription_active(user_id):
+    if user_id in USER_SUBSCRIPTIONS:
+        return USER_SUBSCRIPTIONS[user_id] > datetime.now()
+    return False
 
-# دالة لعرض مؤشر التحميل
-async def show_loading(message, text, edit=False):
-    for emoji in EMOJI_SPINNER:
-        if edit:
-            try:
-                await message.edit_text(f"{emoji} {text}")
-            except:
-                pass
-        else:
-            await message.reply_text(f"{emoji} {text}")
-        await asyncio.sleep(0.5)
+# دالة لتحميل إعدادات المستخدم
+def load_user_settings(user_id):
+    settings_file = os.path.join(SETTINGS_DIR, f"{user_id}.json")
+    if os.path.exists(settings_file):
+        with open(settings_file, 'r') as f:
+            return json.load(f)
+    return {"message": "", "interval": 5, "active": False}
+
+# دالة لحفظ إعدادات المستخدم
+def save_user_settings(user_id, settings):
+    settings_file = os.path.join(SETTINGS_DIR, f"{user_id}.json")
+    with open(settings_file, 'w') as f:
+        json.dump(settings, f)
+
+# دالة لتحميل جلسة المستخدم
+def load_user_session(user_id):
+    session_file = os.path.join(SESSIONS_DIR, f"{user_id}.session")
+    if os.path.exists(session_file):
+        with open(session_file, 'r') as f:
+            return f.read().strip()
+    return None
+
+# دالة لحفظ جلسة المستخدم
+def save_user_session(user_id, session_string):
+    session_file = os.path.join(SESSIONS_DIR, f"{user_id}.session")
+    with open(session_file, 'w') as f:
+        f.write(session_string)
+
+# دالة لحذف حساب المستخدم
+def delete_user_account(user_id):
+    # حذف الجلسة
+    session_file = os.path.join(SESSIONS_DIR, f"{user_id}.session")
+    if os.path.exists(session_file):
+        os.remove(session_file)
+    
+    # حذف الإعدادات
+    settings_file = os.path.join(SETTINGS_DIR, f"{user_id}.json")
+    if os.path.exists(settings_file):
+        os.remove(settings_file)
+    
+    # إيقاف النشر إذا كان نشطاً
+    if user_id in auto_posting_tasks:
+        auto_posting_tasks[user_id].cancel()
+        del auto_posting_tasks[user_id]
+    
+    # حذف من الذاكرة
+    if user_id in user_sessions:
+        del user_sessions[user_id]
+    if user_id in user_settings:
+        del user_settings[user_id]
+    if user_id in user_stats:
+        del user_stats[user_id]
+
+# دالة النشر التلقائي
+async def auto_posting_task(user_id):
+    while user_id in user_settings and user_settings[user_id].get("active", False):
+        try:
+            client = user_sessions[user_id]["client"]
+            settings = user_settings[user_id]
+            message = settings["message"]
+            
+            # الحصول على جميع الدردشات والمجموعات
+            dialogs = await client.get_dialogs()
+            
+            # النشر في المجموعات والقنوات فقط (لا الدردشات الخاصة)
+            for dialog in dialogs:
+                if dialog.is_group or dialog.is_channel:
+                    try:
+                        await client.send_message(dialog.id, message)
+                        
+                        # تحديث الإحصائيات
+                        if user_id not in user_stats:
+                            user_stats[user_id] = {"posts": 0, "groups": set()}
+                        
+                        user_stats[user_id]["posts"] += 1
+                        user_stats[user_id]["groups"].add(dialog.id)
+                        
+                        await asyncio.sleep(5)  # تأخير بين الرسائل لتجنب الحظر
+                    except Exception as e:
+                        logger.error(f"Error posting in {dialog.id}: {e}")
+                        continue
+            
+            # الانتظار للفاصل الزمني المحدد
+            interval = settings.get("interval", 5)
+            for i in range(interval * 60):
+                if not user_settings[user_id].get("active", False):
+                    break
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"Error in auto_posting_task for user {user_id}: {e}")
+            break
 
 # handler لبدء البوت
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
-    # التحقق إذا كان المستخدم محظوراً
-    if is_banned(user_id):
-        await update.message.reply_text("(O_0) عذراً، لقد تم حظرك من استخدام هذا البوت.")
+    # التحقق من وجود اشتراك فعال
+    if not is_subscription_active(user_id):
+        await update.message.reply_text(
+            "🔒 البوت مدفوع ويتطلب اشتراكاً\n\n"
+            "يجب عليك الحصول على كود تفعيل من المدير لاستخدام البوت.\n"
+            "يرجى التواصل مع المدير للحصول على كود التفعيل."
+        )
         return
     
-    mode_text = "🟢 الوضع الحالي: مجاني (لا يحتاج كود)" if BOT_MODE == "free" else "🔴 الوضع الحالي: مدفوع (يحتاج كود)"
+    # تحميل إعدادات المستخدم إذا كانت موجودة
+    if user_id not in user_settings:
+        user_settings[user_id] = load_user_settings(user_id)
     
-    welcome_text = f"""
-✨✨✨✨✨✨✨✨✨✨✨✨✨✨
-🌟  مرحباً بك في بوت إدارة الجلسات!  🌟
-✨✨✨✨✨✨✨✨✨✨✨✨✨✨
-
-⚡  المميزات:
-• إنشاء جلسات آمنة لحسابك
-• إدارة حسابات متعددة
-• حماية بياناتك الشخصية
-• واجهة سهلة الاستخدام
-
-🔐  ماذا يمكنك أن تفعل؟
-- تسجيل الدخول إلى حسابك
-- عرض معلومات الحساب
-- إدارة الجلسات النشطة
-- تسجيل الخروج الآمن
-
-{mode_text}
-
-اضغط على الزر أدناه لبدء رحلة الأمان! 🚀
-"""
+    # تحميل الجلسة إذا كانت موجودة
+    session_string = load_user_session(user_id)
+    if session_string and user_id not in user_sessions:
+        try:
+            client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+            await client.connect()
+            if await client.is_user_authorized():
+                user_sessions[user_id] = {
+                    "client": client,
+                    "session_string": session_string
+                }
+        except Exception as e:
+            logger.error(f"Error loading session for user {user_id}: {e}")
     
-    keyboard = [
-        [InlineKeyboardButton("🔐 تسجيل الدخول", callback_data='login')],
-        [InlineKeyboardButton("📊 معلومات الحساب", callback_data='info'),
-         InlineKeyboardButton("📋 حالة الجلسة", callback_data='status')]
-    ]
+    # عرض لوحة التحكم الرئيسية
+    keyboard = []
+    
+    if user_id in user_sessions:
+        if user_settings[user_id].get("active", False):
+            keyboard.append([InlineKeyboardButton("⏹ إيقاف النشر", callback_data='stop_posting')])
+            # حساب الوقت المتبقي للنشر القادم
+            interval = user_settings[user_id].get("interval", 5)
+            next_post = "قريباً"  # يمكن تحسين هذا بحساب الوقت الفعلي
+            status_text = f"🟢 النشر نشط - التالي: {next_post}"
+        else:
+            keyboard.append([InlineKeyboardButton("▶️ تشغيل النشر", callback_data='start_posting')])
+            status_text = "🔴 النشر متوقف"
+        
+        keyboard.extend([
+            [InlineKeyboardButton("📝 تعيين الكليشة", callback_data='set_message')],
+            [InlineKeyboardButton("⏱ تعيين الفاصل", callback_data='set_interval')],
+            [InlineKeyboardButton("⚙️ إعداد الحساب", callback_data='account_settings')],
+            [InlineKeyboardButton("📊 الإحصائيات", callback_data='stats')],
+            [InlineKeyboardButton("🚪 تسجيل الخروج", callback_data='logout')]
+        ])
+    else:
+        keyboard.append([InlineKeyboardButton("🔐 تسجيل الدخول", callback_data='login')])
+        status_text = "❌ لا توجد جلسة نشطة"
     
     # إضافة أزرار المدير إذا كان المستخدم مديراً
     if is_admin(user_id):
-        keyboard.append([InlineKeyboardButton("⚙️ إدارة البوت", callback_data='admin_panel')])
+        keyboard.append([InlineKeyboardButton("👑 لوحة المدير", callback_data='admin_panel')])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        welcome_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-# handler للوحة تحكم المدير
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
     
-    if not is_admin(user_id):
-        await query.answer("(O_0) ليس لديك صلاحية الوصول إلى هذه الصفحة!")
-        return
-    
-    await query.answer()
-    
-    mode_text = "🟢 الوضع الحالي: مجاني" if BOT_MODE == "free" else "🔴 الوضع الحالي: مدفوع"
-    
-    admin_text = f"""
-👑  لوحة تحكم المدير
+    welcome_text = f"""
+🤖 بوت النشر التلقائي
 
-{mode_text}
+{status_text}
 
-📊  إحصائيات:
-- عدد المستخدمين النشطين: {len(active_sessions)}
-- عدد الجلسات قيد المعالجة: {len(user_sessions)}
-- عدد المستخدمين المحظورين: {len(banned_users)}
+⚙️ الإعدادات الحالية:
+- الكليشة: {user_settings[user_id].get('message', 'غير معينة')[:30] + '...' if user_settings[user_id].get('message') else 'غير معينة'}
+- الفاصل الزمني: {user_settings[user_id].get('interval', 5)} دقائق
 
-⚙️  خيارات الإدارة:
+📅 انتهاء الاشتراك: {USER_SUBSCRIPTIONS[user_id].strftime('%Y-%m-%d') if user_id in USER_SUBSCRIPTIONS else 'غير معروف'}
 """
-    
-    keyboard = [
-        [InlineKeyboardButton("🔄 تحويل إلى وضع مجاني", callback_data='set_free')],
-        [InlineKeyboardButton("💰 تحويل إلى وضع مدفوع", callback_data='set_paid')],
-        [InlineKeyboardButton("📊 إحصائيات مفصلة", callback_data='stats')],
-        [InlineKeyboardButton("🚫 حظر مستخدم", callback_data='ban_user')],
-        [InlineKeyboardButton("📞 سحب رقم مستخدم", callback_data='withdraw_number')],
-        [InlineKeyboardButton("↩️ العودة للرئيسية", callback_data='back_home')]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(admin_text, reply_markup=reply_markup, parse_mode='Markdown')
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
-# handler لأزرار الإدارة
-async def admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# handler لأزرار Inline
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    
-    if not is_admin(user_id):
-        await query.answer("(O_0) ليس لديك صلاحية الوصول إلى هذه الصفحة!")
-        return
-    
     await query.answer()
     
-    if query.data == 'set_free':
-        global BOT_MODE
-        BOT_MODE = "free"
+    # التحقق من صلاحية الاشتراك
+    if not is_subscription_active(user_id) and query.data != 'login':
+        await query.edit_message_text("انتهت صلاحية اشتراكك. يرجى التواصل مع المدير لتجديده.")
+        return
+    
+    if query.data == 'login':
+        user_sessions[user_id] = {'step': 'phone'}
         await query.edit_message_text(
-            "✅  تم تحويل البوت إلى الوضع المجاني بنجاح!\n\n"
-            "يمكن الآن للمستخدمين التسجيل دون الحاجة إلى كود.",
-            parse_mode='Markdown'
+            "📱 يرجى إرسال رقم هاتفك مع رمز الدولة:\n"
+            "مثال: +201234567890"
         )
     
-    elif query.data == 'set_paid':
-        BOT_MODE = "paid"
+    elif query.data == 'set_message':
+        user_sessions[user_id] = {'step': 'set_message'}
         await query.edit_message_text(
-            "✅  تم تحويل البوت إلى الوضع المدفوع بنجاح!\n\n"
-            "سيحتاج المستخدمون الآن إلى كود للتسجيل.",
-            parse_mode='Markdown'
+            "📝 يرجى إرسال الكليشة التي تريد نشرها:\n\n"
+            "ملاحظة: لا يسمح بالوسائط (صور، فيديو، روابط)"
+        )
+    
+    elif query.data == 'set_interval':
+        user_sessions[user_id] = {'step': 'set_interval'}
+        await query.edit_message_text(
+            "⏱ يرجى إرسال الفاصل الزمني بين النشرات (بالدقائق):\n\n"
+            "الحد الأدنى: 5 دقائق"
+        )
+    
+    elif query.data == 'start_posting':
+        if user_id not in user_sessions:
+            await query.edit_message_text("❌ يجب تسجيل الدخول أولاً!")
+            return
+        
+        user_settings[user_id]["active"] = True
+        save_user_settings(user_id, user_settings[user_id])
+        
+        # بدء مهمة النشر التلقائي
+        auto_posting_tasks[user_id] = asyncio.create_task(auto_posting_task(user_id))
+        
+        await query.edit_message_text(
+            "✅ تم بدء النشر التلقائي بنجاح!\n\n"
+            "سيتم الآن نشر كليشتك في جميع مجموعاتك تلقائياً."
+        )
+    
+    elif query.data == 'stop_posting':
+        user_settings[user_id]["active"] = False
+        save_user_settings(user_id, user_settings[user_id])
+        
+        # إيقاف مهمة النشر إذا كانت نشطة
+        if user_id in auto_posting_tasks:
+            auto_posting_tasks[user_id].cancel()
+            del auto_posting_tasks[user_id]
+        
+        await query.edit_message_text("⏹ تم إيقاف النشر التلقائي.")
+    
+    elif query.data == 'account_settings':
+        keyboard = [
+            [InlineKeyboardButton("📝 تغيير الكليشة", callback_data='set_message')],
+            [InlineKeyboardButton("⏱ تغيير الفاصل", callback_data='set_interval')],
+            [InlineKeyboardButton("🗑 حذف الحساب", callback_data='delete_account')],
+            [InlineKeyboardButton("↩️ رجوع", callback_data='back_to_main')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "⚙️ إعدادات الحساب:\n\n"
+            "يمكنك من هنا تعديل إعدادات حسابك أو حذفه بالكامل.",
+            reply_markup=reply_markup
         )
     
     elif query.data == 'stats':
-        stats_text = f"""
-📈  إحصائيات مفصلة:
-
-👥  المستخدمون:
-- النشطون: {len(active_sessions)}
-- قيد المعالجة: {len(user_sessions)}
-- المحظورون: {len(banned_users)}
-
-🔐  وضع البوت: {'🟢 مجاني' if BOT_MODE == 'free' else '🔴 مدفوع'}
-
-🆔  المديرون: {len(ADMIN_IDS)}
-"""
-        await query.edit_message_text(stats_text, parse_mode='Markdown')
-    
-    elif query.data == 'ban_user':
-        user_sessions[user_id] = {'step': 'ban_user'}
-        await query.edit_message_text(
-            "🚫  حظر مستخدم\n\n"
-            "أرسل أيدي المستخدم الذي تريد حظره:",
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == 'withdraw_number':
-        user_sessions[user_id] = {'step': 'withdraw_number'}
-        await query.edit_message_text(
-            "📞  سحب رقم مستخدم\n\n"
-            "أرسل أيدي المستخدم الذي تريد سحب رقمه:",
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == 'back_home':
-        await start(update, context, query=query)
-
-# handler لمعالجة رسائل المدير
-async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    
-    if not is_admin(user_id) or user_id not in user_sessions:
-        return
-    
-    session_data = user_sessions[user_id]
-    text = update.message.text.strip()
-    
-    if session_data['step'] == 'ban_user':
-        try:
-            target_id = int(text)
-            if target_id in banned_users:
-                await update.message.reply_text(f"ℹ️  المستخدم {target_id} محظور بالفعل.")
-            else:
-                banned_users.add(target_id)
-                
-                # قطع الجلسة إذا كان المستخدم نشطاً
-                if target_id in active_sessions:
-                    try:
-                        client = active_sessions[target_id]['client']
-                        await client.disconnect()
-                    except:
-                        pass
-                    del active_sessions[target_id]
-                
-                await update.message.reply_text(f"✅  تم حظر المستخدم {target_id} بنجاح.")
-                
-        except ValueError:
-            await update.message.reply_text("(O_0) أيدي المستخدم يجب أن يكون رقماً صحيحاً.")
+        stats_text = "📊 الإحصائيات:\n\n"
         
-        # تنظيف حالة المدير
-        del user_sessions[user_id]
-    
-    elif session_data['step'] == 'withdraw_number':
-        try:
-            target_id = int(text)
-            if target_id in active_sessions:
-                # الحصول على رقم الهاتف من الجلسة النشطة
-                client = active_sessions[target_id]['client']
-                me = await client.get_me()
-                phone_number = me.phone
-                
-                await update.message.reply_text(f"📞  رقم الهاتف للمستخدم {target_id} هو: {phone_number}")
-            else:
-                await update.message.reply_text("(O_0) هذا المستخدم ليس لديه جلسة نشطة.")
-        
-        except ValueError:
-            await update.message.reply_text("(O_0) أيدي المستخدم يجب أن يكون رقماً صحيحاً.")
-        except Exception as e:
-            await update.message.reply_text(f"(O_0) حدث خطأ: {str(e)}")
-        
-        # تنظيف حالة المدير
-        del user_sessions[user_id]
-
-# handler لزر Inline
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    
-    # التحقق إذا كان المستخدم محظوراً
-    if is_banned(user_id):
-        await query.answer("(O_0) عذراً، لقد تم حظرك من استخدام هذا البوت.")
-        return
-    
-    await query.answer()
-    
-    if query.data == 'login':
-        # التحقق إذا كان البوت في الوضع المدفوع ويطلب كود
-        if BOT_MODE == "paid" and user_id not in ADMIN_IDS:
-            user_sessions[user_id] = {'step': 'access_code'}
-            await query.edit_message_text(
-                "🔐  الوصول يتطلب كود\n\n"
-                "يرجى إرسال كود الوصول للاستمرار:",
-                parse_mode='Markdown'
-            )
-            return
-        
-        user_sessions[user_id] = {'step': 'phone'}
-        await query.edit_message_text(
-            "📱  مرحلة تسجيل الدخول\n\n"
-            "يرجى إرسال رقم هاتفك مع رمز الدولة:\n"
-            "مثال: +201234567890 أو +966512345678\n\n"
-            "⚠️  تأكد من صحة الرقم قبل الإرسال!",
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == 'info':
-        if user_id in active_sessions:
-            await me(update, context, query=query)
+        if user_id in user_stats:
+            stats = user_stats[user_id]
+            stats_text += f"عدد المنشورات: {stats.get('posts', 0)}\n"
+            stats_text += f"عدد المجموعات: {len(stats.get('groups', set()))}\n"
         else:
-            await query.edit_message_text(
-                "❌  ليس لديك جلسة نشطة\n\n"
-                "يجب عليك تسجيل الدخول أولاً لعرض معلومات حسابك.",
-                parse_mode='Markdown'
-            )
+            stats_text += "لا توجد إحصائيات حتى الآن.\n"
+        
+        # إحصائيات عامة (للمدير فقط)
+        if is_admin(user_id):
+            stats_text += f"\n👥 المستخدمون النشطون: {len(user_sessions)}\n"
+            stats_text += f"📨 إجمالي المنشورات: {sum(s.get('posts', 0) for s in user_stats.values())}\n"
+        
+        await query.edit_message_text(stats_text)
     
-    elif query.data == 'status':
-        if user_id in active_sessions:
+    elif query.data == 'logout':
+        if user_id in user_sessions:
+            # إيقاف النشر أولاً
+            if user_settings[user_id].get("active", False):
+                user_settings[user_id]["active"] = False
+                save_user_settings(user_id, user_settings[user_id])
+                
+                if user_id in auto_posting_tasks:
+                    auto_posting_tasks[user_id].cancel()
+                    del auto_posting_tasks[user_id]
+            
+            # قطع الاتصال بحساب Telegram
+            await user_sessions[user_id]["client"].disconnect()
+            del user_sessions[user_id]
+            
             await query.edit_message_text(
-                "✅  حالة الجلسة: نشطة\n\n"
-                "يمكنك استخدام جميع ميزات البوت الآن! 🎉",
-                parse_mode='Markdown'
+                "✅ تم تسجيل الخروج بنجاح!\n\n"
+                "للعودة مرة أخرى، ستحتاج إلى إدخال كود التفعيل من المدير."
             )
         else:
-            await query.edit_message_text(
-                "❌  حالة الجلسة: غير نشطة\n\n"
-                "اضغط على 'تسجيل الدخول' لبدء الجلسة.",
-                parse_mode='Markdown'
-            )
+            await query.edit_message_text("❌ لا توجد جلسة نشطة لتسجيل الخروج منها.")
     
-    elif query.data == 'admin_panel':
-        await admin_panel(update, context)
+    elif query.data == 'delete_account':
+        keyboard = [
+            [InlineKeyboardButton("✅ نعم، احذف حسابي", callback_data='confirm_delete')],
+            [InlineKeyboardButton("❌ لا، إلغاء", callback_data='back_to_main')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "⚠️ تأكيد حذف الحساب\n\n"
+            "هل أنت متأكد من أنك تريد حذف حسابك بالكامل؟\n"
+            "هذا الإجراء لا يمكن التراجع عنه وسيتم حذف جميع بياناتك.",
+            reply_markup=reply_markup
+        )
+    
+    elif query.data == 'confirm_delete':
+        delete_user_account(user_id)
+        await query.edit_message_text(
+            "🗑 تم حذف حسابك بنجاح.\n\n"
+            "شكراً لك على استخدام البوت."
+        )
+    
+    elif query.data == 'back_to_main':
+        await start(update, context)
+    
+    elif query.data == 'admin_panel' and is_admin(user_id):
+        keyboard = [
+            [InlineKeyboardButton("🎟 إنشاء كود تفعيل", callback_data='generate_code')],
+            [InlineKeyboardButton("👥 إدارة المستخدمين", callback_data='manage_users')],
+            [InlineKeyboardButton("📊 إحصائيات عامة", callback_data='admin_stats')],
+            [InlineKeyboardButton("📣 إشعار عام", callback_data='broadcast')],
+            [InlineKeyboardButton("↩️ رجوع", callback_data='back_to_main')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "👑 لوحة تحكم المدير\n\n"
+            "من هنا يمكنك إدارة البوت والمستخدمين.",
+            reply_markup=reply_markup
+        )
+    
+    elif query.data == 'generate_code' and is_admin(user_id):
+        # إنشاء كود تفعيل جديد
+        import random
+        import string
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+        expiry_date = datetime.now() + timedelta(days=30)
+        ACTIVATION_CODES[code] = {
+            "created_by": user_id,
+            "expiry_date": expiry_date,
+            "used": False
+        }
+        await query.edit_message_text(
+            f"🎟 تم إنشاء كود التفعيل:\n\n"
+            f"الكود: `{code}`\n"
+            f"صالح حتى: {expiry_date.strftime('%Y-%m-%d')}\n\n"
+            "يمكن للمستخدم استخدام هذا الكود للتفعيل.",
+            parse_mode='Markdown'
+        )
+    
+    elif query.data == 'manage_users' and is_admin(user_id):
+        keyboard = [
+            [InlineKeyboardButton("🚫 حظر مستخدم", callback_data='ban_user')],
+            [InlineKeyboardButton("📞 سحب أرقام", callback_data='withdraw_numbers')],
+            [InlineKeyboardButton("↩️ رجوع", callback_data='admin_panel')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "👥 إدارة المستخدمين\n\n"
+            "من هنا يمكنك حظر المستخدمين أو سحب أرقامهم.",
+            reply_markup=reply_markup
+        )
+    
+    elif query.data == 'admin_stats' and is_admin(user_id):
+        stats_text = "📊 الإحصائيات العامة:\n\n"
+        stats_text += f"👥 عدد المستخدمين: {len(user_settings)}\n"
+        stats_text += f"🔢 عدد الجلسات النشطة: {len(user_sessions)}\n"
+        stats_text += f"📨 إجمالي المنشورات: {sum(s.get('posts', 0) for s in user_stats.values())}\n"
+        
+        # عدد الأكواد المنتهية الصلاحية
+        expired_codes = sum(1 for code in ACTIVATION_CODES.values() 
+                           if code['expiry_date'] < datetime.now() or code['used'])
+        stats_text += f"🎟 الأكواد المنتهية: {expired_codes}\n"
+        
+        await query.edit_message_text(stats_text)
+    
+    elif query.data == 'broadcast' and is_admin(user_id):
+        user_sessions[user_id] = {'step': 'broadcast_message'}
+        await query.edit_message_text(
+            "📣 إشعار عام\n\n"
+            "أرسل الرسالة التي تريد إرسالها لجميع المستخدمين:"
+        )
 
-# handler لمعالجة الرسائل
+# handler لمعالجة الرسائل النصية
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    text = update.message.text
     
-    # التحقق إذا كان المستخدم محظوراً
-    if is_banned(user_id):
-        await update.message.reply_text("(O_0) عذراً، لقد تم حظرك من استخدام هذا البوت.")
+    if user_id not in user_sessions or 'step' not in user_sessions[user_id]:
         return
     
-    # معالجة رسائل المدير أولاً
-    if is_admin(user_id) and user_id in user_sessions:
-        await handle_admin_messages(update, context)
-        return
+    step = user_sessions[user_id]['step']
     
-    if user_id not in user_sessions:
-        return
-    
-    session_data = user_sessions[user_id]
-    
-    # معالجة كود الوصول للوضع المدفوع
-    if session_data['step'] == 'access_code':
-        access_code = update.message.text.strip()
-        
-        # هنا يمكنك إضافة التحقق من كود الوصول في قاعدة بيانات
-        # للمثال، سنفترض أن الكود هو "12345"
-        if access_code == "12345":
-            session_data['step'] = 'phone'
-            await update.message.reply_text(
-                "✅  تم قبول كود الوصول!\n\n"
-                "يمكنك الآن متابعة عملية التسجيل.",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                "❌  كود الوصول غير صحيح\n\n"
-                "يرجى المحاولة مرة أخرى أو التواصل مع الدعم.",
-                parse_mode='Markdown'
-            )
-        return
-    
-    if session_data['step'] == 'phone':
-        # حفظ رقم الهاتف والانتقال لخطوة الرمز
-        phone_number = update.message.text.strip()
-        
+    if step == 'phone':
         # التحقق من صحة رقم الهاتف
-        if not phone_number.startswith('+'):
-            await update.message.reply_text(
-                "❌  رقم هاتف غير صحيح\n\n"
-                "يجب أن يبدأ رقم الهاتف بعلامة + متبوعة برمز الدولة.\n"
-                "مثال: +201234567890",
-                parse_mode='Markdown'
-            )
+        if not re.match(r'^\+\d{8,15}$', text):
+            await update.message.reply_text("❌ رقم الهاتف غير صحيح. يرجى إرسال رقم صحيح مع رمز الدولة.")
             return
         
-        session_data['phone'] = phone_number
+        user_sessions[user_id]['phone'] = text
+        user_sessions[user_id]['step'] = 'code'
         
-        # إرسال رسالة الانتظار مع مؤشر
-        wait_message = await update.message.reply_text("🔄  جاري الاتصال بخوادم التلجرام...")
+        # إنشاء جلسة Telethon جديدة
+        session = StringSession()
+        client = TelegramClient(session, API_ID, API_HASH)
+        await client.connect()
         
+        # إرسال طلب الكود
         try:
-            # إنشاء جلسة جديدة
-            session = StringSession()
-            client = TelegramClient(session, API_ID, API_HASH)
-            
-            # الاتصال وإرسال طلب الكود
-            await client.connect()
-            
-            # عرض مؤشر التحميل
-            loading_message = await update.message.reply_text("📡  جاري إرسال طلب التحقق...")
-            await show_loading(loading_message, "جارٍ الاتصال بحسابك...", edit=True)
-            
-            # إرسال طلب الكود
-            result = await client.send_code_request(phone_number)
-            session_data['phone_code_hash'] = result.phone_code_hash
-            session_data['client'] = client
-            session_data['step'] = 'code'
-            
-            await loading_message.edit_text(
-                "✅  تم إرسال طلب التحقق بنجاح!\n\n"
-                "📨  تم إرسال رمز التحقق إلى:\n"
-                f"{phone_number}\n\n"
-                "🔢  أرسل الرمز الذي استلمته الآن:\n"
-                "يمكنك إرساله بأي شكل (مع مسافات أو بدون):\n"
-                "• 12345 أو 1 2 3 4 5 أو 12-34-5\n\n"
-                "⏰  ملاحظة: الرمز صالح لمدة 5 دقائق فقط!",
-                parse_mode='Markdown'
-            )
-            
-        except PhoneNumberInvalidError:
-            await wait_message.edit_text(
-                "❌  رقم الهاتف غير صالح\n\n"
-                "يرجى التحقق من رقم الهاتف وإعادة المحاولة.\n"
-                "تأكد من إضافة رمز الدولة بشكل صحيح.",
-                parse_mode='Markdown'
-            )
-            if user_id in user_sessions:
-                del user_sessions[user_id]
-            
+            await client.send_code_request(text)
+            user_sessions[user_id]['client'] = client
+            await update.message.reply_text("📨 تم إرسال كود التحقق إلى حسابك. يرجى إرسال الكود:")
         except Exception as e:
-            error_msg = str(e)
-            if "flood" in error_msg.lower():
-                await wait_message.edit_text(
-                    "⏰  تم تجاوز الحد المسموح\n\n"
-                    "لقد طلبت العديد من الرموز في وقت قصير.\n"
-                    "يرجى الانتظار بعض الوقت قبل المحاولة مرة أخرى.",
-                    parse_mode='Markdown'
-                )
-            else:
-                await wait_message.edit_text(
-                    f"❌  حدث خطأ غير متوقع:\n\n{error_msg}\n\n"
-                    "يرجى المحاولة مرة أخرى لاحقاً.",
-                    parse_mode='Markdown'
-                )
-            if user_id in user_sessions:
-                del user_sessions[user_id]
+            await update.message.reply_text(f"❌ خطأ في إرسال الكود: {str(e)}")
+            del user_sessions[user_id]
     
-    elif session_data['step'] == 'code':
-        # تنظيف الرمز من المسافات والأحرف غير الرقمية
-        raw_code = update.message.text.strip()
-        cleaned_code = clean_code(raw_code)
-        
-        # التحقق من أن الرمز يحتوي على أرقام فقط
-        if not cleaned_code.isdigit() or len(cleaned_code) < 4:
-            await update.message.reply_text(
-                "❌  رمز تحقق غير صحيح\n\n"
-                "يجب أن يتكون رمز التحقق من أرقام فقط (4-6 أرقام).\n"
-                "يمكنك إرساله بأي شكل:\n"
-                "• 12345 أو 1 2 3 4 5 أو 12-34-5\n\n"
-                "يرجى إعادة إرسال الرمز:",
-                parse_mode='Markdown'
-            )
-            return
-        
-        session_data['code'] = cleaned_code
-        
-        # عرض مؤشر التحميل
-        loading_message = await update.message.reply_text("🔐  جاري التحقق من الرمز...")
-        await show_loading(loading_message, "جارٍ تسجيل الدخول إلى حسابك...", edit=True)
-        
+    elif step == 'code':
+        # محاولة تسجيل الدخول بالكود
         try:
-            client = session_data['client']
+            client = user_sessions[user_id]['client']
+            await client.sign_in(user_sessions[user_id]['phone'], text)
             
-            # محاولة تسجيل الدخول بالرمز
-            try:
-                await client.sign_in(
-                    phone=session_data['phone'],
-                    code=session_data['code'],
-                    phone_code_hash=session_data['phone_code_hash']
-                )
-                
-                # حفظ الجلسة النشطة
-                active_sessions[user_id] = {
-                    'client': client,
-                    'session_string': client.session.save()
-                }
-                
-                await loading_message.edit_text(
-                    "🎉  تم تسجيل الدخول بنجاح!\n\n"
-                    "✅  حسابك الآن متصل بالبوت\n\n"
-                    "يمكنك الآن استخدام الأوامر التالية:\n"
-                    "• /me - عرض معلومات الحساب\n"
-                    "• /logout - تسجيل الخروج\n"
-                    "• /status - حالة الجلسة\n\n"
-                    "🔒  جلستك آمنة ومشفرة",
-                    parse_mode='Markdown'
-                )
-                
-            except SessionPasswordNeededError:
-                # إذا كان الحساب محمي بكلمة مرور ثنائية
-                session_data['step'] = 'password'
-                await loading_message.edit_text(
-                    "🔐  حسابك محمي بكلمة مرور ثنائية\n\n"
-                    "يرجى إرسال كلمة المرور الآن:",
-                    parse_mode='Markdown'
-                )
-                return
-                
-            except Exception as e:
-                await loading_message.edit_text(
-                    f"❌  فشل تسجيل الدخول:\n\n{str(e)}\n\n"
-                    "يرجى المحاولة مرة أخرى من البداية.",
-                    parse_mode='Markdown'
-                )
-                # تنظيف البيانات في حالة الفشل
-                if user_id in user_sessions:
-                    del user_sessions[user_id]
-                try:
-                    await client.disconnect()
-                except:
-                    pass
-                return
+            # حفظ الجلسة
+            session_string = client.session.save()
+            save_user_session(user_id, session_string)
+            user_sessions[user_id]['session_string'] = session_string
             
-            # تنظيف بيانات الجلسة المؤقتة بعد النجاح
-            if user_id in user_sessions:
-                del user_sessions[user_id]
+            await update.message.reply_text("✅ تم تسجيل الدخول بنجاح!")
             
+            # العودة إلى القائمة الرئيسية
+            del user_sessions[user_id]['step']
+            await start(update, context)
+            
+        except SessionPasswordNeededError:
+            user_sessions[user_id]['step'] = 'password'
+            await update.message.reply_text("🔐 حسابك محمي بكلمة مرور ثنائية. يرجى إرسال كلمة المرور:")
         except Exception as e:
-            await loading_message.edit_text(
-                f"❌  حدث خطأ غير متوقع:\n\n{str(e)}\n\n"
-                "يرجى المحاولة مرة أخرى لاحقاً.",
-                parse_mode='Markdown'
-            )
-            # تنظيف البيانات في حالة الفشل
-            if user_id in user_sessions:
-                del user_sessions[user_id]
-            try:
-                await client.disconnect()
-            except:
-                pass
+            await update.message.reply_text(f"❌ خطأ في تسجيل الدخول: {str(e)}")
+            del user_sessions[user_id]
     
-    elif session_data['step'] == 'password':
+    elif step == 'password':
         # معالجة كلمة المرور الثنائية
-        password = update.message.text
-        
-        loading_message = await update.message.reply_text("🔐  جاري التحقق من كلمة المرور...")
-        await show_loading(loading_message, "جارٍ تسجيل الدخول النهائي...", edit=True)
-        
         try:
-            client = session_data['client']
-            await client.sign_in(password=password)
+            client = user_sessions[user_id]['client']
+            await client.sign_in(password=text)
             
-            # حفظ الجلسة النشطة
-            active_sessions[user_id] = {
-                'client': client,
-                'session_string': client.session.save()
-            }
+            # حفظ الجلسة
+            session_string = client.session.save()
+            save_user_session(user_id, session_string)
+            user_sessions[user_id]['session_string'] = session_string
             
-            await loading_message.edit_text(
-                "🎉  تم تسجيل الدخول بنجاح!\n\n"
-                "✅  تم تفعيل الحماية الثنائية\n\n"
-                "حسابك الآن آمن ومتصل بالبوت بشكل كامل! 🛡️",
-                parse_mode='Markdown'
-            )
+            await update.message.reply_text("✅ تم تسجيل الدخول بنجاح!")
             
-            # تنظيف بيانات الجلسة المؤقتة
-            if user_id in user_sessions:
-                del user_sessions[user_id]
-                
+            # العودة إلى القائمة الرئيسية
+            del user_sessions[user_id]['step']
+            await start(update, context)
+            
         except Exception as e:
-            await loading_message.edit_text(
-                f"❌  كلمة المرور غير صحيحة:\n\n{str(e)}\n\n"
-                "يرجى إعادة إدخال كلمة المرور الصحيحة:",
-                parse_mode='Markdown'
-            )
-
-# handler لعرض معلومات الحساب
-async def me(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
-    if query:
-        user_id = query.from_user.id
-        message = query
-    else:
-        user_id = update.me
+            await update.message.reply_text(f"❌ خطأ في تسجيل الدخول: {str(e)}")
+            del user_sessions[user_id]
+    
+    elif step == 'set_message':
+        # حفظ الكليشة
+        user_settings[user_id]['message'] = text
+        save_user_settings(user_id, user_settings[user_id])
+        
+        await update.message.reply_text("✅ تم حفظ الكليشة بنجاح!")
+        del user_sessions[user_id]['step']
+        await start(update, context)
+    
+    elif step == 'set_interval':
+        # التحقق من الفاصل الزمني
+        try:
+            interval
