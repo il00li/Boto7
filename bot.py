@@ -3,13 +3,22 @@ import json
 import os
 import re
 import signal
+import sys
 from datetime import datetime, timedelta
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError, ChannelInvalidError, ChatWriteForbiddenError
+from telethon.network import ConnectionTcpFull
 import logging
 
 # تكوين logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('bot.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # إعدادات البوت
@@ -53,8 +62,16 @@ active_tasks = {}
 user_clients = {}  # لتخزين عملاء Telethon للمستخدمين
 user_states = {}  # لتخزين حالة المستخدم أثناء التفاعل
 
-# إنشاء عميل البوت
-bot = TelegramClient('bot', API_ID, API_HASH)
+# إنشاء عميل البوت مع إعدادات اتصال محسنة
+bot = TelegramClient(
+    'bot', 
+    API_ID, 
+    API_HASH,
+    connection=ConnectionTcpFull,
+    request_retries=5,
+    retry_delay=5,
+    auto_reconnect=True
+)
 
 # وظائف المساعدة
 def get_user_data(user_id):
@@ -177,7 +194,14 @@ async def start_publishing(user_id):
     
     # إنشاء عميل للمستخدم
     try:
-        client = TelegramClient(session_name, API_ID, API_HASH)
+        client = TelegramClient(
+            session_name, 
+            API_ID, 
+            API_HASH,
+            connection=ConnectionTcpFull,
+            request_retries=3,
+            retry_delay=3
+        )
         await client.start()
         user_clients[user_id] = client
     except Exception as e:
@@ -527,7 +551,14 @@ async def handle_phone_input(event, phone):
     
     # إنشاء جلسة جديدة
     session_name = os.path.join(SESSIONS_DIR, str(user_id))
-    client = TelegramClient(session_name, API_ID, API_HASH)
+    client = TelegramClient(
+        session_name, 
+        API_ID, 
+        API_HASH,
+        connection=ConnectionTcpFull,
+        request_retries=3,
+        retry_delay=3
+    )
     
     try:
         await client.connect()
@@ -558,7 +589,14 @@ async def handle_code_input(event, code):
         return
     
     reg_data = user_data['registration']
-    client = TelegramClient(reg_data['session_name'], API_ID, API_HASH)
+    client = TelegramClient(
+        reg_data['session_name'], 
+        API_ID, 
+        API_HASH,
+        connection=ConnectionTcpFull,
+        request_retries=3,
+        retry_delay=3
+    )
     
     try:
         await client.connect()
@@ -590,7 +628,14 @@ async def handle_password_input(event, password):
         return
     
     reg_data = user_data['registration']
-    client = TelegramClient(reg_data['session_name'], API_ID, API_HASH)
+    client = TelegramClient(
+        reg_data['session_name'], 
+        API_ID, 
+        API_HASH,
+        connection=ConnectionTcpFull,
+        request_retries=3,
+        retry_delay=3
+    )
     
     try:
         await client.connect()
@@ -860,44 +905,46 @@ async def check_subscriptions():
 
 # معالجة الإشارات للإغلاق النظيف
 async def shutdown():
+    logger.info("Shutting down bot...")
+    
     # إلغاء جميع المهام النشطة
-    for task in asyncio.all_tasks():
-        if task is not asyncio.current_task():
+    for task_id, task in list(active_tasks.items()):
+        try:
             task.cancel()
+        except:
+            pass
+        del active_tasks[task_id]
     
     # إغلاق جميع عملاء المستخدمين
-    for client in user_clients.values():
+    for user_id, client in list(user_clients.items()):
         try:
             await client.disconnect()
         except:
             pass
-    
-    # إلغاء جميع مهام النشر النشطة
-    for task in active_tasks.values():
-        try:
-            task.cancel()
-        except:
-            pass
+        del user_clients[user_id]
     
     try:
         await bot.disconnect()
     except:
         pass
+    
+    logger.info("Bot shutdown complete")
 
 # بدء البوت والمهام الدورية
 async def main():
     # بدء مهمة التحقق من الصلاحية
     subscription_task = asyncio.create_task(check_subscriptions())
     
-    # معالجة الإشارات للإغلاق النظيف
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
-    
     try:
         # تشغيل البوت
-        await bot.start()
+        logger.info("Starting bot...")
+        await bot.start(bot_token=BOT_TOKEN)
+        logger.info("Bot started successfully")
+        
+        # الانتظار حتى ينقطع الاتصال
         await bot.run_until_disconnected()
+    except KeyboardInterrupt:
+        logger.info("Bot interrupted by user")
     except Exception as e:
         logger.error(f"Bot error: {str(e)}")
     finally:
@@ -915,6 +962,6 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}") 
+        logger.error(f"Unexpected error: {str(e)}")
