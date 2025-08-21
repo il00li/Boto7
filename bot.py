@@ -69,7 +69,7 @@ def load_data():
             "activated": True,
             "activation_code": "ADMIN_PERMANENT",
             "activated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "expires_at": (datetime.now() + timedelta(days=365*10)).strftime("%Y-%m-%d %H:%M:%S"),  # 10 سنوات
+            "expires_at": (datetime.now() + timedelta(days=365*10)).strftime("%Y-%m-%d %H:%M:%S"),
             "banned": False,
             "settings": {
                 "clone": "مرحباً! هذا منشور تجريبي.",
@@ -287,7 +287,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await start_login(update, context)
     elif data == "activate_subscription":
         await query.edit_message_text(
-            "لتفعيل الاشتراك، يرجى إدخال كود التفعيل باستخدام الأمر:\n/activate كود_التفعيل"
+            "لتفعيل الاشتراك، يرجى إدخال كود التفعيل:"
         )
         return ACTIVATE_SUBSCRIPTION
     elif data == "start_posting":
@@ -296,6 +296,9 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await stop_posting(update, context)
     elif data == "back_main":
         return await main_menu(update, context)
+    else:
+        await query.edit_message_text("❌ الزر غير معروف، يرجى المحاولة مرة أخرى.")
+        return MAIN_MENU
 
 # لوحة المستخدم
 async def user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -332,13 +335,14 @@ async def handle_user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await start_login(update, context)
     elif data == "activate_subscription":
         await query.edit_message_text(
-            "لتفعيل الاشتراك، يرجى إدخال كود التفعيل باستخدام الأمر:\n/activate كود_التفعيل"
+            "لتفعيل الاشتراك، يرجى إدخال كود التفعيل:"
         )
         return ACTIVATE_SUBSCRIPTION
     elif data == "back_main":
         return await main_menu(update, context)
-    elif data == "back_user":
-        return await user_panel(update, context)
+    else:
+        await query.edit_message_text("❌ الزر غير معروف، يرجى المحاولة مرة أخرى.")
+        return USER_SETTINGS
 
 # لوحة المدير - تظهر فقط عند استخدام /admin
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -411,134 +415,11 @@ async def handle_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return VIEW_USER
     elif data == "admin_stats":
         return await admin_statistics(update, context)
-    elif data == "back_admin":
-        return await admin_panel(update, context)
     elif data == "back_main":
         return await main_menu(update, context)
-
-# معالجة إنشاء كود التفعيل
-async def handle_generate_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ هذا الأمر للمدير فقط.")
-        return ConversationHandler.END
-    
-    duration_input = update.message.text
-    try:
-        duration_days = int(duration_input) if duration_input.isdigit() else 30
-        if duration_days < 1:
-            await update.message.reply_text("❌ عدد الأيام يجب أن يكون أكبر من الصفر.")
-            return GENERATE_CODE
-        
-        code = generate_code(duration_days)
-        await update.message.reply_text(
-            f"✅ تم إنشاء كود جديد:\n\nالكود: `{code}`\nالصالح لمدة: {duration_days} يوم"
-        )
-        return await admin_panel(update, context)
-    except ValueError:
-        await update.message.reply_text("❌ المدخل غير صحيح! يرجى إدخال رقم صحيح.")
-        return GENERATE_CODE
-
-# معالجة حظر مستخدم
-async def handle_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ هذا الأمر للمدير فقط.")
-        return ConversationHandler.END
-    
-    user_id_input = update.message.text
-    try:
-        user_id = int(user_id_input)
-        if ban_user(user_id):
-            await update.message.reply_text(f"✅ تم حظر المستخدم {user_id} بنجاح.")
-        else:
-            await update.message.reply_text(f"❌ لم يتم العثور على المستخدم {user_id}.")
-        return await admin_panel(update, context)
-    except ValueError:
-        await update.message.reply_text("❌ المدخل غير صحيح! يرجى إدخال معرف مستخدم صحيح.")
-        return BAN_USER
-
-# معالجة فك حظر مستخدم
-async def handle_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ هذا الأمر للمدير فقط.")
-        return ConversationHandler.END
-    
-    user_id_input = update.message.text
-    try:
-        user_id = int(user_id_input)
-        if unban_user(user_id):
-            await update.message.reply_text(f"✅ تم فك حظر المستخدم {user_id} بنجاح.")
-        else:
-            await update.message.reply_text(f"❌ لم يتم العثور على المستخدم {user_id} أو لم يكن محظوراً.")
-        return await admin_panel(update, context)
-    except ValueError:
-        await update.message.reply_text("❌ المدخل غير صحيح! يرجى إدخال معرف مستخدم صحيح.")
-        return UNBAN_USER
-
-# معالجة حذف حساب مستخدم
-async def handle_delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ هذا الأمر للمدير فقط.")
-        return ConversationHandler.END
-    
-    user_id_input = update.message.text
-    try:
-        user_id = int(user_id_input)
-        if delete_user_account(user_id):
-            await update.message.reply_text(f"✅ تم حذف حساب المستخدم {user_id} بنجاح.")
-        else:
-            await update.message.reply_text(f"❌ لم يتم العثور على المستخدم {user_id}.")
-        return await admin_panel(update, context)
-    except ValueError:
-        await update.message.reply_text("❌ المدخل غير صحيح! يرجى إدخال معرف مستخدم صحيح.")
-        return DELETE_USER
-
-# معالجة الإشعار العام
-async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ هذا الأمر للمدير فقط.")
-        return ConversationHandler.END
-    
-    message = update.message.text
-    sent_count = 0
-    failed_count = 0
-    
-    for user_id in users:
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"📢 إشعار عام من الإدارة:\n\n{message}"
-            )
-            sent_count += 1
-        except Exception as e:
-            logger.error(f"Error sending broadcast to {user_id}: {e}")
-            failed_count += 1
-    
-    await update.message.reply_text(
-        f"✅ تم إرسال الإشعار العام:\nالرسائل المرسلة: {sent_count}\nالرسائل الفاشلة: {failed_count}"
-    )
-    return await admin_panel(update, context)
-
-# معالجة عرض رسائل مستخدم
-async def handle_view_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ هذا الأمر للمدير فقط.")
-        return ConversationHandler.END
-    
-    user_id_input = update.message.text
-    try:
-        user_id = int(user_id_input)
-        # هذه الوظيفة تحتاج إلى تطبيق حسب احتياجك
-        await update.message.reply_text(f"عرض رسائل المستخدم {user_id} - هذه الميزة تحت التطوير.")
-        return await admin_panel(update, context)
-    except ValueError:
-        await update.message.reply_text("❌ المدخل غير صحيح! يرجى إدخال معرف مستخدم صحيح.")
-        return VIEW_USER
+    else:
+        await query.edit_message_text("❌ الزر غير معروف، يرجى المحاولة مرة أخرى.")
+        return ADMIN_PANEL
 
 # إحصائيات المدير
 async def admin_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -668,6 +549,9 @@ async def handle_account_settings(update: Update, context: ContextTypes.DEFAULT_
         return CONFIRM_DELETE
     elif data == "back_user":
         return await user_panel(update, context)
+    else:
+        await query.edit_message_text("❌ الزر غير معروف، يرجى المحاولة مرة أخرى.")
+        return USER_SETTINGS
 
 # معالجة تأكيد حذف الحساب
 async def handle_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -683,13 +567,14 @@ async def handle_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
     elif data == "cancel_delete":
         return await account_settings(update, context)
+    else:
+        await query.edit_message_text("❌ الزر غير معروف، يرجى المحاولة مرة أخرى.")
+        return CONFIRM_DELETE
 
 # بدء النشر
 async def start_posting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    # هذه الوظيفة تحتاج إلى تطبيق حسب احتياجك
     await query.edit_message_text("🚀 بدء النشر - هذه الميزة تحت التطوير.")
     return MAIN_MENU
 
@@ -697,8 +582,6 @@ async def start_posting(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_posting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    # هذه الوظيفة تحتاج إلى تطبيق حسب احتياجك
     await query.edit_message_text("⏹ إيقاف النشر - هذه الميزة تحت التطوير.")
     return MAIN_MENU
 
@@ -706,7 +589,6 @@ async def stop_posting(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     await query.edit_message_text("الرجاء إرسال رقم هاتفك مع رمز الدولة (مثال: +1234567890):")
     return PHONE
 
@@ -730,7 +612,6 @@ async def handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ رمز التحقق غير صحيح. يجب أن يكون 5 أرقام.")
         return CODE
     
-    # هذه الوظيفة تحتاج إلى تطبيق كامل باستخدام Telethon
     await update.message.reply_text("✅ تم تسجيل الدخول بنجاح!")
     return await main_menu(update, context)
 
@@ -863,13 +744,22 @@ def main():
     application.add_handler(CommandHandler("admin", admin))
     application.add_handler(CommandHandler("activate", activate))
     
-    # إضافة معالجات المحادثة
+    # إعداد معالجات المحادثة مع جميع المعالجات المطلوبة
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            MAIN_MENU: [CallbackQueryHandler(handle_main_menu)],
-            USER_SETTINGS: [CallbackQueryHandler(handle_user_panel)],
-            ADMIN_PANEL: [CallbackQueryHandler(handle_admin_panel)],
+            MAIN_MENU: [
+                CallbackQueryHandler(handle_main_menu)
+            ],
+            USER_SETTINGS: [
+                CallbackQueryHandler(handle_user_panel)
+            ],
+            ADMIN_PANEL: [
+                CallbackQueryHandler(handle_admin_panel)
+            ],
+            CONFIRM_DELETE: [
+                CallbackQueryHandler(handle_confirm_delete)
+            ],
             GENERATE_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_generate_code)],
             BAN_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ban_user)],
             UNBAN_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_unban_user)],
@@ -878,7 +768,6 @@ def main():
             VIEW_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_view_user)],
             SET_CLONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_clone)],
             SET_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_interval)],
-            CONFIRM_DELETE: [CallbackQueryHandler(handle_confirm_delete)],
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone)],
             CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code)],
             ACTIVATE_SUBSCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_activate_subscription)],
