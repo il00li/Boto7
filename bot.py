@@ -6,12 +6,16 @@ from datetime import datetime, timedelta
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel, Chat, Message
-from telethon.errors import ChatWriteForbiddenError, ChannelInvalidError, ChannelPrivateError
+from telethon.errors import ChatWriteForbiddenError, ChannelInvalidError, ChannelPrivateError, FloodWaitError, RPCError
 from telethon.tl.functions.contacts import BlockRequest, UnblockRequest
 import logging
+import time
 
 # إعدادات التسجيل
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # إعدادات البوت
@@ -30,8 +34,15 @@ if not os.path.exists('subscription_codes'):
 if not os.path.exists('admin_data'):
     os.makedirs('admin_data')
 
-# إنشاء عميل Telethon
-client = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# إنشاء عميل Telethon مع إعدادات متقدمة
+client = TelegramClient(
+    'bot_session', 
+    API_ID, 
+    API_HASH,
+    connection_retries=5,
+    retry_delay=5,
+    auto_reconnect=True
+).start(bot_token=BOT_TOKEN)
 
 # قاموس لتخزين حالات المستخدمين أثناء التسجيل
 user_states = {}
@@ -45,6 +56,23 @@ publishing_tasks = {}
 
 # قاموس لتخزين جلسات المستخدمين النشطة
 user_sessions = {}
+
+# دالة لإعادة المحاولة مع التعامل مع FloodWait
+async def retry_on_flood_wait(func, *args, **kwargs):
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except FloodWaitError as e:
+            wait_time = e.seconds
+            logger.warning(f"FloodWait error, waiting for {wait_time} seconds (attempt {attempt + 1}/{max_retries})")
+            await asyncio.sleep(wait_time)
+        except RPCError as e:
+            logger.error(f"RPCError: {e}, attempt {attempt + 1}/{max_retries}")
+            if attempt == max_retries - 1:
+                raise
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+    return None
 
 # دالة لتحميل بيانات المستخدم
 def load_user_data(user_id):
@@ -139,8 +167,11 @@ def is_subscription_valid(user_data):
     if not user_data:
         return False
     
+    if 'subscription_date' not in user_data:
+        return False
+    
     subscription_date = datetime.strptime(user_data['subscription_date'], '%Y-%m-%d')
-    validity_days = user_data['validity_days']
+    validity_days = user_data.get('validity_days', 0)
     expiry_date = subscription_date + timedelta(days=validity_days)
     
     return datetime.now() < expiry_date
@@ -171,7 +202,7 @@ def unban_user(user_id):
 # دالة لإرسال رسالة إلى المدير
 async def notify_admin(message):
     try:
-        await client.send_message(ADMIN_ID, message)
+        await retry_on_flood_wait(client.send_message, ADMIN_ID, message)
     except Exception as e:
         logger.error(f"Failed to notify admin: {e}")
 
@@ -225,13 +256,17 @@ async def publish_to_groups(user_id, user_session, cliche, interval):
     
     while user_data and user_data.get('publishing', False):
         try:
+            # إعادة الاتصال إذا كانت الجلسة غير متصلة
+            if not user_session.is_connected():
+                await user_session.connect()
+            
             groups = await get_user_groups(user_session)
             successful_posts = 0
             failed_posts = 0
             
             for group in groups:
                 try:
-                    await user_session.send_message(group.id, cliche)
+                    await retry_on_flood_wait(user_session.send_message, group.id, cliche)
                     successful_posts += 1
                     logger.info(f"Posted to {group.title} for user {user_id}")
                 except (ChatWriteForbiddenError, ChannelInvalidError, ChannelPrivateError):
@@ -269,10 +304,16 @@ async def stop_publishing_for_user(user_id):
     if user_id in publishing_tasks:
         publishing_tasks[user_id].cancel()
         try:
-            await publishing_tasks[user_id]
+            await asyncio.wait_for(publishing_tasks[user_id], timeout=10)
         except asyncio.CancelledError:
             logger.info(f"Publishing task for user {user_id} was cancelled")
-        del publishing_tasks[user_id]
+        except asyncio.TimeoutError:
+            logger.warning(f"Publishing task for user {user_id} timeout during cancellation")
+        except Exception as e:
+            logger.error(f"Error cancelling publishing task for user {user_id}: {e}")
+        finally:
+            if user_id in publishing_tasks:
+                del publishing_tasks[user_id]
     
     # فصل جلسة المستخدم إذا كانت متصلة
     if user_id in user_sessions:
@@ -281,7 +322,9 @@ async def stop_publishing_for_user(user_id):
             logger.info(f"Disconnected session for user {user_id}")
         except Exception as e:
             logger.error(f"Error disconnecting session for user {user_id}: {e}")
-        del user_sessions[user_id]
+        finally:
+            if user_id in user_sessions:
+                del user_sessions[user_id]
     
     # تحديث حالة النشر في ملف المستخدم
     user_data = load_user_data(user_id)
@@ -304,7 +347,9 @@ async def logout_user(user_id):
             logger.info(f"Disconnected session for user {user_id} during logout")
         except Exception as e:
             logger.error(f"Error disconnecting session for user {user_id} during logout: {e}")
-        del user_sessions[user_id]
+        finally:
+            if user_id in user_sessions:
+                del user_sessions[user_id]
     
     # تحديث حالة الجلسة في ملف المستخدم
     if user_data:
@@ -426,7 +471,8 @@ async def send_periodic_report():
                             
                             if days_remaining <= 3:
                                 try:
-                                    await client.send_message(
+                                    await retry_on_flood_wait(
+                                        client.send_message,
                                         int(user_id),
                                         f"⚠️ تنبيه: اشتراكك سينتهي خلال {days_remaining} يوم(s). يرجى تجديد اشتراكك."
                                     )
@@ -435,6 +481,7 @@ async def send_periodic_report():
                         
         except Exception as e:
             logger.error(f"Error in periodic report task: {e}")
+            await asyncio.sleep(3600)  # الانتظار ساعة قبل إعادة المحاولة
 
 # دالة للحصول على قائمة جميع المستخدمين
 def get_all_users():
@@ -469,7 +516,7 @@ async def broadcast_message(message_text, exclude_banned=True):
                     continue
                 
                 try:
-                    await client.send_message(int(user_id), message_text)
+                    await retry_on_flood_wait(client.send_message, int(user_id), message_text)
                     success_count += 1
                 except Exception as e:
                     logger.error(f"Failed to send message to user {user_id}: {e}")
@@ -670,7 +717,14 @@ async def callback_handler(event):
             with open(f'sessions/{user_data["session_name"]}', 'r') as f:
                 session_string = f.read()
             
-            user_session = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+            user_session = TelegramClient(
+                StringSession(session_string), 
+                API_ID, 
+                API_HASH,
+                connection_retries=3,
+                retry_delay=5,
+                auto_reconnect=True
+            )
             await user_session.connect()
             
             # التحقق من صحة الجلسة
@@ -1250,15 +1304,50 @@ async def message_handler(event):
             # تنظيف حالة المستخدم
             del user_states[user_id]
 
+# معالجة الأخطاء العامة
+@client.on(events.NewMessage)
+async def error_handler(event):
+    try:
+        # تجاهل الرسائل التي تمت معالجتها بالفعل
+        if event.message.text and event.message.text.startswith('/'):
+            return
+            
+        # تجاهل الرسائل التي تمت معالجتها بواسطة معالجات أخرى
+        if event.chat_id in user_states or event.chat_id in admin_states:
+            return
+            
+    except Exception as e:
+        logger.error(f"Error in error handler: {e}")
+
 # تشغيل البوت والمهام الدورية
 async def main():
-    await client.start()
-    logger.info('Bot started successfully!')
-    
-    # بدء مهمة التقارير الدورية
-    asyncio.create_task(send_periodic_report())
-    
-    await client.run_until_disconnected()
+    try:
+        await client.start()
+        logger.info('Bot started successfully!')
+        
+        # بدء مهمة التقارير الدورية
+        asyncio.create_task(send_periodic_report())
+        
+        await client.run_until_disconnected()
+    except Exception as e:
+        logger.error(f"Error starting bot: {e}")
+    finally:
+        # تنظيف جميع الجلسات عند إيقاف البوت
+        for user_id in list(user_sessions.keys()):
+            try:
+                await user_sessions[user_id].disconnect()
+            except:
+                pass
+        await client.disconnect()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # تشغيل البوت مع التعامل مع الاستثناءات
+    while True:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            logger.info("Bot stopped by user")
+            break
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}, restarting in 10 seconds...")
+            time.sleep(10)
