@@ -19,7 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # بيانات البوت
-TOKEN = "8324471840:AAFMiwhvyEwLUdpDyBaAlmh5fSEwExnVF5k"
+TOKEN = "8324471840:AAEX2W5x02F-NKZTt7qM0NNovrrF-gFRBsU"
 API_ID = 23656977
 API_HASH = "49d3f43531a92b3f5bc403766313ca1e"
 ADMIN_ID = 6689435577
@@ -30,8 +30,8 @@ ADMIN_ID = 6689435577
     GENERATE_CODE, BAN_USER, UNBAN_USER, 
     DELETE_USER, BROADCAST, VIEW_USER,
     SET_CLONE, SET_INTERVAL, CONFIRM_DELETE,
-    PHONE, CODE
-) = range(14)
+    PHONE, CODE, ACTIVATE_SUBSCRIPTION
+) = range(15)
 
 # ملفات البيانات
 USERS_FILE = "users.json"
@@ -213,7 +213,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⛔ تم حظرك من استخدام البوت.")
         else:
             await update.message.reply_text("⛔ تم حظرك من استخدام البوت.")
-        return
+        return ConversationHandler.END
     
     # التحقق من وجود المستخدم في النظام
     if str(user.id) not in users:
@@ -289,7 +289,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "لتفعيل الاشتراك، يرجى إدخال كود التفعيل باستخدام الأمر:\n/activate كود_التفعيل"
         )
-        return MAIN_MENU
+        return ACTIVATE_SUBSCRIPTION
     elif data == "start_posting":
         return await start_posting(update, context)
     elif data == "stop_posting":
@@ -334,7 +334,7 @@ async def handle_user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "لتفعيل الاشتراك، يرجى إدخال كود التفعيل باستخدام الأمر:\n/activate كود_التفعيل"
         )
-        return USER_SETTINGS
+        return ACTIVATE_SUBSCRIPTION
     elif data == "back_main":
         return await main_menu(update, context)
     elif data == "back_user":
@@ -777,6 +777,34 @@ async def handle_set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ المدخل غير صحيح! يرجى إدخال رقم صحيح.")
         return SET_INTERVAL
 
+# معالجة تفعيل الاشتراك
+async def handle_activate_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    code = update.message.text.strip().upper()
+    
+    # التحقق من صحة الكود
+    if code in codes and not codes[code]["used"]:
+        expires_at = datetime.strptime(codes[code]["expires_at"], "%Y-%m-%d %H:%M:%S")
+        if datetime.now() < expires_at:
+            # تفعيل الاشتراك
+            users[str(user.id)]["activated"] = True
+            users[str(user.id)]["activation_code"] = code
+            users[str(user.id)]["activated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            users[str(user.id)]["expires_at"] = expires_at.strftime("%Y-%m-%d %H:%M:%S")
+            codes[code]["used"] = True
+            codes[code]["used_by"] = user.id
+            codes[code]["used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_data()
+            
+            await update.message.reply_text("✅ تم تفعيل الاشتراك بنجاح!")
+            return await main_menu(update, context)
+        else:
+            await update.message.reply_text("❌ كود التفعيل منتهي الصلاحية.")
+    else:
+        await update.message.reply_text("❌ كود التفعيل غير صحيح أو مستخدم مسبقاً.")
+    
+    return ACTIVATE_SUBSCRIPTION
+
 # الأمر /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await main_menu(update, context)
@@ -793,9 +821,26 @@ async def activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     code = context.args[0].upper()
-    # هنا يجب إضافة منطق التحقق من الكود وتفعيل الاشتراك
-    await update.message.reply_text(f"✅ تم تفعيل الاشتراك بالكود: {code}")
-    return await main_menu(update, context)
+    # التحقق من صحة الكود
+    if code in codes and not codes[code]["used"]:
+        expires_at = datetime.strptime(codes[code]["expires_at"], "%Y-%m-%d %H:%M:%S")
+        if datetime.now() < expires_at:
+            # تفعيل الاشتراك
+            users[str(user.id)]["activated"] = True
+            users[str(user.id)]["activation_code"] = code
+            users[str(user.id)]["activated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            users[str(user.id)]["expires_at"] = expires_at.strftime("%Y-%m-%d %H:%M:%S")
+            codes[code]["used"] = True
+            codes[code]["used_by"] = user.id
+            codes[code]["used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_data()
+            
+            await update.message.reply_text("✅ تم تفعيل الاشتراك بنجاح!")
+            return await main_menu(update, context)
+        else:
+            await update.message.reply_text("❌ كود التفعيل منتهي الصلاحية.")
+    else:
+        await update.message.reply_text("❌ كود التفعيل غير صحيح أو مستخدم مسبقاً.")
 
 # إلغاء المحادثة
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -836,6 +881,7 @@ def main():
             CONFIRM_DELETE: [CallbackQueryHandler(handle_confirm_delete)],
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone)],
             CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code)],
+            ACTIVATE_SUBSCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_activate_subscription)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -848,4 +894,4 @@ def main():
     application.run_polling()
 
 if __name__ == "__main__":
-    main() 
+    main()
