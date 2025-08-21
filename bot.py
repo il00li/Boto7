@@ -15,10 +15,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # إعدادات البوت
-API_ID = int(os.environ.get('API_ID', 23656977))
-API_HASH = os.environ.get('API_HASH', '49d3f43531a92b3f5bc403766313ca1e')
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8324471840:AAHYZ2GjqnNmYYSLFBWLGHizRH3QUgP9uMg')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', 6689435577))  # معرّف المدير
+API_ID = 23656977
+API_HASH = '49d3f43531a92b3f5bc403766313ca1e'
+BOT_TOKEN = '8324471840:AAHYZ2GjqnNmYYSLFBWLGHizRH3QUgP9uMg'
+ADMIN_ID = 6689435577
 
 # إنشاء مجلد قاعدة البيانات إذا لم يكن موجوداً
 if not os.path.exists('user_data'):
@@ -490,24 +490,32 @@ async def start_handler(event):
         await event.respond('❌ تم حظرك من استخدام البوت.')
         return
     
+    # إذا كان المستخدم هو المدير، عرض لوحة التحكم
+    if user_id == ADMIN_ID:
+        buttons = [
+            [Button.inline("👑 لوحة تحكم المدير", data="admin_panel")]
+        ]
+        await event.respond('مرحباً يا مدير!', buttons=buttons)
+        return
+    
     user_data = load_user_data(user_id)
     
     # التحقق من صلاحية الاشتراك
     if not user_data or not is_subscription_valid(user_data):
         buttons = [
-            [Button.inline("تفعيل الاشتراك", data="activate_subscription")]
+            [Button.inline("🔑 تفعيل الاشتراك", data="activate_subscription")]
         ]
         await event.respond('مرحباً! يبدو أنك غير مشترك أو أن اشتراكك قد انتهى. يرجى تفعيل اشتراكك أولاً.', buttons=buttons)
         return
     
     buttons = [
-        [Button.inline("تسجيل", data="register")],
-        [Button.inline("تعيين الكليشة", data="set_cliche")],
-        [Button.inline("تعيين الفاصل", data="set_interval")],
-        [Button.inline("تشغيل", data="start_publishing"), Button.inline("إيقاف", data="stop_publishing")],
-        [Button.inline("إعداد الحساب", data="setup_account")],
-        [Button.inline("تسجيل الخروج", data="logout")],
-        [Button.inline("إحصائيات", data="statistics")]
+        [Button.inline("📝 تسجيل", data="register")],
+        [Button.inline("💬 تعيين الكليشة", data="set_cliche")],
+        [Button.inline("⏱️ تعيين الفاصل", data="set_interval")],
+        [Button.inline("▶️ تشغيل النشر", data="start_publishing"), Button.inline("⏹️ إيقاف النشر", data="stop_publishing")],
+        [Button.inline("⚙️ إعداد الحساب", data="setup_account")],
+        [Button.inline("🚪 تسجيل الخروج", data="logout")],
+        [Button.inline("📊 إحصائيات", data="statistics")]
     ]
     
     await event.respond('مرحباً! اختر أحد الخيارات:', buttons=buttons)
@@ -522,17 +530,64 @@ async def callback_handler(event):
         await event.answer('❌ تم حظرك من استخدام البوت.', alert=True)
         return
     
-    user_data = load_user_data(user_id)
-    
     data = event.data.decode('utf-8')
     
-    if data == 'activate_subscription':
+    if data == 'admin_panel':
+        # عرض لوحة تحكم المدير
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        buttons = [
+            [Button.inline("🔑 توليد كود", data="admin_generate_code")],
+            [Button.inline("🚫 حظر مستخدم", data="admin_ban_user")],
+            [Button.inline("✅ فك الحظر", data="admin_unban_user")],
+            [Button.inline("🗑️ حذف حساب", data="admin_delete_user")],
+            [Button.inline("📢 إشعار عام", data="admin_broadcast")],
+            [Button.inline("🌐 إشعار شامل", data="admin_global_broadcast")],
+            [Button.inline("👁️ سحب رقم", data="admin_monitor_user")],
+            [Button.inline("📊 الإحصائيات", data="admin_stats")]
+        ]
+        
+        await event.answer('جاري فتح لوحة التحكم...')
+        await event.edit('👑 لوحة تحكم المدير:', buttons=buttons)
+    
+    elif data == 'admin_stats':
+        # عرض إحصائيات النظام للمدير
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        stats = await get_system_stats()
+        stats_message = f"""
+📊 إحصائيات النظام:
+
+👥 المستخدمون:
+- المستخدمون النشطون: {stats['active_users']}
+- إجمالي المستخدمين: {stats['total_users']}
+
+📨 النشرات:
+- إجمالي النشرات الناجحة: {stats['total_posts']}
+
+🔑 أكواد الاشتراك:
+- الأكواد النشطة: {stats['active_codes']}
+- الأكواد المستخدمة: {stats['used_codes']}
+- الأكواد المنتهية: {stats['expired_codes']}
+        """
+        
+        buttons = [[Button.inline("🔙 رجوع", data="admin_panel")]]
+        await event.answer('جاري تحميل الإحصائيات...')
+        await event.edit(stats_message, buttons=buttons)
+    
+    elif data == 'activate_subscription':
         # بدء عملية تفعيل الاشتراك
         user_states[user_id] = 'awaiting_subscription_code'
         await event.answer('جاري فتح نموذج التفعيل...')
         await event.edit('يرجى إدخال كود الاشتراك:')
     
     elif data == 'register':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -549,6 +604,8 @@ async def callback_handler(event):
         await event.edit('يرجى إرسال رقم هاتفك مع رمز الدولة (مثال: +1234567890)')
         
     elif data == 'set_cliche':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -565,6 +622,8 @@ async def callback_handler(event):
         await event.edit('يرجى إرسال الكليشة (رسالة نصية فقط بدون روابط أو وسائط):')
         
     elif data == 'set_interval':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -581,6 +640,8 @@ async def callback_handler(event):
         await event.edit('يرجى إدخال الفاصل الزمني بين النشرات (بالدقائق، لا يقل عن 5 دقائق):')
         
     elif data == 'start_publishing':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -647,6 +708,8 @@ async def callback_handler(event):
             await event.answer(f'حدث خطأ أثناء تشغيل النشر: {e}', alert=True)
         
     elif data == 'stop_publishing':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -662,6 +725,8 @@ async def callback_handler(event):
         await client.send_message(user_id, 'تم إيقاف النشر بنجاح.')
         
     elif data == 'setup_account':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -674,16 +739,18 @@ async def callback_handler(event):
         
         # عرض خيارات إعداد الحساب
         account_buttons = [
-            [Button.inline("تعديل الكليشة", data="edit_cliche")],
-            [Button.inline("تعديل الفاصل", data="edit_interval")],
-            [Button.inline("حذف الحساب", data="delete_account")],
-            [Button.inline("رجوع", data="back_to_main")]
+            [Button.inline("✏️ تعديل الكليشة", data="edit_cliche")],
+            [Button.inline("⏱️ تعديل الفاصل", data="edit_interval")],
+            [Button.inline("🗑️ حذف الحساب", data="delete_account")],
+            [Button.inline("🔙 رجوع", data="back_to_main")]
         ]
         
         await event.answer('جاري فتح إعدادات الحساب...')
         await event.edit('اختر أحد خيارات إعداد الحساب:', buttons=account_buttons)
         
     elif data == 'edit_cliche':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -695,6 +762,8 @@ async def callback_handler(event):
         await event.edit('يرجى إرسال الكليشة الجديدة (رسالة نصية فقط بدون روابط أو وسائط):')
         
     elif data == 'edit_interval':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -706,6 +775,8 @@ async def callback_handler(event):
         await event.edit('يرجى إدخال الفاصل الزمني الجديد بين النشرات (بالدقائق، لا يقل عن 5 دقائق):')
         
     elif data == 'delete_account':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -713,14 +784,16 @@ async def callback_handler(event):
         
         # تأكيد حذف الحساب
         confirm_buttons = [
-            [Button.inline("نعم، احذف حسابي", data="confirm_delete")],
-            [Button.inline("لا، إلغاء", data="cancel_delete")]
+            [Button.inline("✅ نعم، احذف حسابي", data="confirm_delete")],
+            [Button.inline("❌ لا، إلغاء", data="cancel_delete")]
         ]
         
         await event.answer('جاري فتح نافذة تأكيد الحذف...')
         await event.edit('⚠️ هل أنت متأكد من أنك تريد حذف حسابك؟ سيتم حذف جميع بياناتك ولا يمكن استعادتها.', buttons=confirm_buttons)
         
     elif data == 'confirm_delete':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -740,10 +813,10 @@ async def callback_handler(event):
     elif data == 'cancel_delete':
         # العودة إلى قائمة إعداد الحساب
         account_buttons = [
-            [Button.inline("تعديل الكليشة", data="edit_cliche")],
-            [Button.inline("تعديل الفاصل", data="edit_interval")],
-            [Button.inline("حذف الحساب", data="delete_account")],
-            [Button.inline("رجوع", data="back_to_main")]
+            [Button.inline("✏️ تعديل الكليشة", data="edit_cliche")],
+            [Button.inline("⏱️ تعديل الفاصل", data="edit_interval")],
+            [Button.inline("🗑️ حذف الحساب", data="delete_account")],
+            [Button.inline("🔙 رجوع", data="back_to_main")]
         ]
         
         await event.answer('تم إلغاء عملية الحذف.')
@@ -752,19 +825,21 @@ async def callback_handler(event):
     elif data == 'back_to_main':
         # العودة إلى القائمة الرئيسية
         buttons = [
-            [Button.inline("تسجيل", data="register")],
-            [Button.inline("تعيين الكليشة", data="set_cliche")],
-            [Button.inline("تعيين الفاصل", data="set_interval")],
-            [Button.inline("تشغيل", data="start_publishing"), Button.inline("إيقاف", data="stop_publishing")],
-            [Button.inline("إعداد الحساب", data="setup_account")],
-            [Button.inline("تسجيل الخروج", data="logout")],
-            [Button.inline("إحصائيات", data="statistics")]
+            [Button.inline("📝 تسجيل", data="register")],
+            [Button.inline("💬 تعيين الكليشة", data="set_cliche")],
+            [Button.inline("⏱️ تعيين الفاصل", data="set_interval")],
+            [Button.inline("▶️ تشغيل النشر", data="start_publishing"), Button.inline("⏹️ إيقاف النشر", data="stop_publishing")],
+            [Button.inline("⚙️ إعداد الحساب", data="setup_account")],
+            [Button.inline("🚪 تسجيل الخروج", data="logout")],
+            [Button.inline("📊 إحصائيات", data="statistics")]
         ]
         
         await event.answer('جاري العودة إلى القائمة الرئيسية...')
         await event.edit('مرحباً! اختر أحد الخيارات:', buttons=buttons)
         
     elif data == 'logout':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -782,6 +857,8 @@ async def callback_handler(event):
             await event.answer('حدث خطأ أثناء تسجيل الخروج. يرجى المحاولة مرة أخرى.', alert=True)
         
     elif data == 'statistics':
+        user_data = load_user_data(user_id)
+        
         # التحقق من صلاحية الاشتراك
         if not user_data or not is_subscription_valid(user_data):
             await event.answer('اشتراكك غير فعال أو منتهي الصلاحية. يرجى تفعيل الاشتراك أولاً.', alert=True)
@@ -793,20 +870,124 @@ async def callback_handler(event):
         days_remaining = (expiry_date - datetime.now()).days
         
         stats_text = f"""
-إحصائيات حسابك:
-- الكليشة: {user_data.get('cliche', 'غير معينة')}
-- الفاصل الزمني: {user_data.get('interval', 'غير معين')} دقيقة
-- حالة النشر: {'نشط' if user_data.get('publishing', False) else 'متوقف'}
-- حالة الجلسة: {'نشطة' if user_data.get('session_active', False) else 'غير نشطة'}
-- عدد النشرات الناجحة: {user_data.get('successful_posts', 0)}
-- عدد النشرات الفاشلة: {user_data.get('failed_posts', 0)}
-- آخر نشر: {user_data.get('last_publish', 'لم يحدث بعد')}
-- تاريخ الاشتراك: {user_data.get('subscription_date', 'غير معروف')}
-- مدة الصلاحية: {user_data.get('validity_days', 'غير معروفة')} يوم
-- الأيام المتبقية: {days_remaining} يوم
+📊 إحصائيات حسابك:
+
+💬 الكليشة: {user_data.get('cliche', 'غير معينة')}
+⏱️ الفاصل الزمني: {user_data.get('interval', 'غير معين')} دقيقة
+📤 حالة النشر: {'🟢 نشط' if user_data.get('publishing', False) else '🔴 متوقف'}
+🔐 حالة الجلسة: {'🟢 نشطة' if user_data.get('session_active', False) else '🔴 غير نشطة'}
+✅ عدد النشرات الناجحة: {user_data.get('successful_posts', 0)}
+❌ عدد النشرات الفاشلة: {user_data.get('failed_posts', 0)}
+🕒 آخر نشر: {user_data.get('last_publish', 'لم يحدث بعد')}
+📅 تاريخ الاشتراك: {user_data.get('subscription_date', 'غير معروف')}
+⏳ مدة الصلاحية: {user_data.get('validity_days', 'غير معروفة')} يوم
+📆 الأيام المتبقية: {days_remaining} يوم
         """
+        buttons = [[Button.inline("🔙 رجوع", data="back_to_main")]]
         await event.answer('جاري تحميل الإحصائيات...')
-        await event.edit(stats_text)
+        await event.edit(stats_text, buttons=buttons)
+    
+    # معالجة أزرار المدير
+    elif data == 'admin_generate_code':
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        # توليد كود اشتراك جديد
+        code = create_subscription_code()
+        expiry_date = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
+        
+        await event.answer('تم توليد كود جديد!', alert=True)
+        await event.edit(f'🔑 كود الاشتراك الجديد:\n\nالكود: `{code}`\nصلاحية الكود: {expiry_date}')
+        
+        # إرسال إشعار للمدير بالكود
+        await client.send_message(ADMIN_ID, f'تم إنشاء كود اشتراك جديد:\nالكود: `{code}`\nصلاحية الكود: {expiry_date}')
+    
+    elif data == 'admin_ban_user':
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        # حظر مستخدم
+        admin_states[user_id] = 'awaiting_ban_user'
+        await event.answer('جاري فتح نافذة حظر المستخدم...')
+        await event.edit('يرجى إدخال معرف المستخدم الذي تريد حظره:')
+    
+    elif data == 'admin_unban_user':
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        # فك حظر مستخدم
+        admin_states[user_id] = 'awaiting_unban_user'
+        await event.answer('جاري فتح نافذة فك حظر المستخدم...')
+        await event.edit('يرجى إدخال معرف المستخدم الذي تريد فك حظره:')
+    
+    elif data == 'admin_delete_user':
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        # حذف حساب مستخدم
+        admin_states[user_id] = 'awaiting_delete_user'
+        await event.answer('جاري فتح نافذة حذف المستخدم...')
+        await event.edit('يرجى إدخال معرف المستخدم الذي تريد حذف حسابه:')
+    
+    elif data == 'admin_broadcast':
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        # إشعار عام لجميع المستخدمين (باستثناء المحظورين)
+        admin_states[user_id] = 'awaiting_broadcast'
+        await event.answer('جاري فتح نافذة الإشعار العام...')
+        await event.edit('يرجى إدخال الرسالة التي تريد إرسالها لجميع المستخدمين (باستثناء المحظورين):')
+    
+    elif data == 'admin_global_broadcast':
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        # إشعار شامل لجميع المستخدمين (بما فيهم المحظورين)
+        admin_states[user_id] = 'awaiting_global_broadcast'
+        await event.answer('جاري فتح نافذة الإشعار الشامل...')
+        await event.edit('يرجى إدخال الرسالة التي تريد إرسالها لجميع المستخدمين (بما فيهم المحظورين):')
+    
+    elif data == 'admin_monitor_user':
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        # سحب رقم (عرض قائمة المستخدمين)
+        users = get_all_users()
+        
+        if not users:
+            await event.answer('لا يوجد مستخدمين مسجلين!', alert=True)
+            return
+        
+        # إنشاء أزرار للمستخدمين
+        user_buttons = []
+        for user in users[:10]:  # عرض أول 10 مستخدمين فقط
+            status = "🟢" if user['active'] else "🔴"
+            user_buttons.append([Button.inline(f"{status} {user['id']}", data=f"monitor_{user['id']}")])
+        
+        # إضافة زر الرجوع
+        user_buttons.append([Button.inline("🔙 رجوع", data="admin_panel")])
+        
+        await event.answer('جاري تحميل قائمة المستخدمين...')
+        await event.edit('اختر المستخدم الذي تريد مراقبته:', buttons=user_buttons)
+    
+    elif data.startswith('monitor_'):
+        if user_id != ADMIN_ID:
+            await event.answer('أنت لست مديراً!', alert=True)
+            return
+            
+        # بدء مراقبة مستخدم معين
+        target_user_id = data.split('_')[1]
+        admin_states[user_id] = f'monitoring_user_{target_user_id}'
+        
+        await event.answer(f'جاري بدء مراقبة المستخدم {target_user_id}...', alert=True)
+        await event.edit(f'تم تفعيل مراقبة المستخدم {target_user_id}. سيتم توجيه جميع رسائله إليك.')
 
 # معالجة الرسائل النصية
 @client.on(events.NewMessage)
@@ -931,13 +1112,13 @@ async def message_handler(event):
                 
                 # عرض القائمة الرئيسية
                 buttons = [
-                    [Button.inline("تسجيل", data="register")],
-                    [Button.inline("تعيين الكليشة", data="set_cliche")],
-                    [Button.inline("تعيين الفاصل", data="set_interval")],
-                    [Button.inline("تشغيل", data="start_publishing"), Button.inline("إيقاف", data="stop_publishing")],
-                    [Button.inline("إعداد الحساب", data="setup_account")],
-                    [Button.inline("تسجيل الخروج", data="logout")],
-                    [Button.inline("إحصائيات", data="statistics")]
+                    [Button.inline("📝 تسجيل", data="register")],
+                    [Button.inline("💬 تعيين الكليشة", data="set_cliche")],
+                    [Button.inline("⏱️ تعيين الفاصل", data="set_interval")],
+                    [Button.inline("▶️ تشغيل النشر", data="start_publishing"), Button.inline("⏹️ إيقاف النشر", data="stop_publishing")],
+                    [Button.inline("⚙️ إعداد الحساب", data="setup_account")],
+                    [Button.inline("🚪 تسجيل الخروج", data="logout")],
+                    [Button.inline("📊 إحصائيات", data="statistics")]
                 ]
                 
                 await event.respond('مرحباً! اختر أحد الخيارات:', buttons=buttons)
@@ -1069,160 +1250,6 @@ async def message_handler(event):
             # تنظيف حالة المستخدم
             del user_states[user_id]
 
-# أمر لفتح لوحة تحكم المدير
-@client.on(events.NewMessage(pattern='/admin', from_users=[ADMIN_ID]))
-async def admin_panel_handler(event):
-    buttons = [
-        [Button.inline("توليد كود", data="admin_generate_code")],
-        [Button.inline("حظر مستخدم", data="admin_ban_user")],
-        [Button.inline("فك الحظر", data="admin_unban_user")],
-        [Button.inline("حذف حساب", data="admin_delete_user")],
-        [Button.inline("إشعار عام", data="admin_broadcast")],
-        [Button.inline("إشعار شامل", data="admin_global_broadcast")],
-        [Button.inline("سحب رقم", data="admin_monitor_user")]
-    ]
-    
-    await event.respond('👑 لوحة تحكم المدير:', buttons=buttons)
-
-# معالجة أزرار المدير
-@client.on(events.CallbackQuery(pattern='admin_'))
-async def admin_callback_handler(event):
-    user_id = event.sender_id
-    
-    # التحقق من أن المستخدم هو المدير
-    if user_id != ADMIN_ID:
-        await event.answer('أنت لست مديراً!', alert=True)
-        return
-    
-    data = event.data.decode('utf-8')
-    
-    if data == 'admin_generate_code':
-        # توليد كود اشتراك جديد
-        code = create_subscription_code()
-        expiry_date = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
-        
-        await event.answer('تم توليد كود جديد!', alert=True)
-        await event.edit(f'🔑 كود الاشتراك الجديد:\n\nالكود: `{code}`\nصلاحية الكود: {expiry_date}')
-        
-        # إرسال إشعار للمدير بالكود
-        await client.send_message(ADMIN_ID, f'تم إنشاء كود اشتراك جديد:\nالكود: `{code}`\nصلاحية الكود: {expiry_date}')
-    
-    elif data == 'admin_ban_user':
-        # حظر مستخدم
-        admin_states[user_id] = 'awaiting_ban_user'
-        await event.answer('جاري فتح نافذة حظر المستخدم...')
-        await event.edit('يرجى إدخال معرف المستخدم الذي تريد حظره:')
-    
-    elif data == 'admin_unban_user':
-        # فك حظر مستخدم
-        admin_states[user_id] = 'awaiting_unban_user'
-        await event.answer('جاري فتح نافذة فك حظر المستخدم...')
-        await event.edit('يرجى إدخال معرف المستخدم الذي تريد فك حظره:')
-    
-    elif data == 'admin_delete_user':
-        # حذف حساب مستخدم
-        admin_states[user_id] = 'awaiting_delete_user'
-        await event.answer('جاري فتح نافذة حذف المستخدم...')
-        await event.edit('يرجى إدخال معرف المستخدم الذي تريد حذف حسابه:')
-    
-    elif data == 'admin_broadcast':
-        # إشعار عام لجميع المستخدمين (باستثناء المحظورين)
-        admin_states[user_id] = 'awaiting_broadcast'
-        await event.answer('جاري فتح نافذة الإشعار العام...')
-        await event.edit('يرجى إدخال الرسالة التي تريد إرسالها لجميع المستخدمين (باستثناء المحظورين):')
-    
-    elif data == 'admin_global_broadcast':
-        # إشعار شامل لجميع المستخدمين (بما فيهم المحظورين)
-        admin_states[user_id] = 'awaiting_global_broadcast'
-        await event.answer('جاري فتح نافذة الإشعار الشامل...')
-        await event.edit('يرجى إدخال الرسالة التي تريد إرسالها لجميع المستخدمين (بما فيهم المحظورين):')
-    
-    elif data == 'admin_monitor_user':
-        # سحب رقم (عرض قائمة المستخدمين)
-        users = get_all_users()
-        
-        if not users:
-            await event.answer('لا يوجد مستخدمين مسجلين!', alert=True)
-            return
-        
-        # إنشاء أزرار للمستخدمين
-        user_buttons = []
-        for user in users[:10]:  # عرض أول 10 مستخدمين فقط
-            status = "🟢" if user['active'] else "🔴"
-            user_buttons.append([Button.inline(f"{status} {user['id']}", data=f"monitor_{user['id']}")])
-        
-        # إضافة زر الرجوع
-        user_buttons.append([Button.inline("رجوع", data="admin_back")])
-        
-        await event.answer('جاري تحميل قائمة المستخدمين...')
-        await event.edit('اختر المستخدم الذي تريد مراقبته:', buttons=user_buttons)
-    
-    elif data == 'admin_back':
-        # العودة إلى لوحة تحكم المدير
-        buttons = [
-            [Button.inline("توليد كود", data="admin_generate_code")],
-            [Button.inline("حظر مستخدم", data="admin_ban_user")],
-            [Button.inline("فك الحظر", data="admin_unban_user")],
-            [Button.inline("حذف حساب", data="admin_delete_user")],
-            [Button.inline("إشعار عام", data="admin_broadcast")],
-            [Button.inline("إشعار شامل", data="admin_global_broadcast")],
-            [Button.inline("سحب رقم", data="admin_monitor_user")]
-        ]
-        
-        await event.answer('جاري العودة إلى لوحة التحكم...')
-        await event.edit('👑 لوحة تحكم المدير:', buttons=buttons)
-    
-    elif data.startswith('monitor_'):
-        # بدء مراقبة مستخدم معين
-        target_user_id = data.split('_')[1]
-        admin_states[user_id] = f'monitoring_user_{target_user_id}'
-        
-        await event.answer(f'جاري بدء مراقبة المستخدم {target_user_id}...', alert=True)
-        await event.edit(f'تم تفعيل مراقبة المستخدم {target_user_id}. سيتم توجيه جميع رسائله إليك.')
-
-# أمر للمدير لإنشاء أكواد اشتراك
-@client.on(events.NewMessage(pattern='/generate_code', from_users=[ADMIN_ID]))
-async def generate_code_handler(event):
-    try:
-        # استخراج مدة الاشتراك من الرسالة (افتراضي 30 يوم)
-        parts = event.text.split()
-        duration_days = 30
-        
-        if len(parts) > 1:
-            try:
-                duration_days = int(parts[1])
-            except ValueError:
-                await event.respond('المدة غير صالحة. استخدم: /generate_code [عدد الأيام]')
-                return
-        
-        code = create_subscription_code(duration_days)
-        await event.respond(f'تم إنشاء كود اشتراك جديد:\nالكود: `{code}`\nالمدة: {duration_days} يوم\nتاريخ الانتهاء: {(datetime.now() + timedelta(days=duration_days)).strftime("%Y-%m-%d")}')
-    except Exception as e:
-        await event.respond(f'حدث خطأ أثناء إنشاء الكود: {e}')
-
-# أمر للمدير لعرض إحصائيات النظام
-@client.on(events.NewMessage(pattern='/stats', from_users=[ADMIN_ID]))
-async def stats_handler(event):
-    stats = await get_system_stats()
-    
-    stats_message = f"""
-📊 إحصائيات النظام:
-
-👥 المستخدمون:
-- المستخدمون النشطون: {stats['active_users']}
-- إجمالي المستخدمين: {stats['total_users']}
-
-📨 النشرات:
-- إجمالي النشرات الناجحة: {stats['total_posts']}
-
-🔑 أكواد الاشتراك:
-- الأكواد النشطة: {stats['active_codes']}
-- الأكواد المستخدمة: {stats['used_codes']}
-- الأكواد المنتهية: {stats['expired_codes']}
-    """
-    
-    await event.respond(stats_message)
-
 # تشغيل البوت والمهام الدورية
 async def main():
     await client.start()
@@ -1234,4 +1261,4 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
-    asyncio.run(main()) 
+    asyncio.run(main())
