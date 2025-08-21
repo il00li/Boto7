@@ -63,6 +63,26 @@ def load_data():
         logger.error(f"Error loading codes: {e}")
         codes = {}
     
+    # إضافة المدير كاشتراك دائم إذا لم يكن موجوداً
+    if str(ADMIN_ID) not in users:
+        users[str(ADMIN_ID)] = {
+            "activated": True,
+            "activation_code": "ADMIN_PERMANENT",
+            "activated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "expires_at": (datetime.now() + timedelta(days=365*10)).strftime("%Y-%m-%d %H:%M:%S"),  # 10 سنوات
+            "banned": False,
+            "settings": {
+                "clone": "مرحباً! هذا منشور تجريبي.",
+                "interval": 300
+            }
+        }
+        save_data()
+    else:
+        # التأكد من أن المدير مفعل دائماً
+        users[str(ADMIN_ID)]["activated"] = True
+        users[str(ADMIN_ID)]["expires_at"] = (datetime.now() + timedelta(days=365*10)).strftime("%Y-%m-%d %H:%M:%S")
+        save_data()
+    
     if not os.path.exists(SESSIONS_DIR):
         os.makedirs(SESSIONS_DIR)
 
@@ -102,6 +122,10 @@ def check_subscription(user_id):
     user_id = str(user_id)
     if user_id not in users:
         return False
+    
+    # المدير لديه اشتراك دائم
+    if user_id == str(ADMIN_ID):
+        return True
     
     user_data = users[user_id]
     if not user_data.get("activated", False):
@@ -209,35 +233,29 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # التحقق من صلاحية الاشتراك
     has_active_subscription = check_subscription(user.id)
     
-    if user.id == ADMIN_ID:
-        keyboard = [
-            [InlineKeyboardButton("👤 إدارة المستخدم", callback_data="user_panel")],
-            [InlineKeyboardButton("👑 لوحة المدير", callback_data="admin_panel")]
-        ]
-    else:
-        if has_active_subscription:
-            expires_at = datetime.strptime(users[str(user.id)]["expires_at"], "%Y-%m-%d %H:%M:%S")
-            remaining_days = (expires_at - datetime.now()).days
-            
-            has_active_session = has_session(user.id)
-            
-            if has_active_session:
-                keyboard = [
-                    [InlineKeyboardButton("🚀 بدء النشر", callback_data="start_posting")],
-                    [InlineKeyboardButton("⏹ إيقاف النشر", callback_data="stop_posting")],
-                    [InlineKeyboardButton("📊 الإحصائيات", callback_data="user_stats")],
-                    [InlineKeyboardButton("⚙️ إعدادات الحساب", callback_data="account_settings")]
-                ]
-            else:
-                keyboard = [
-                    [InlineKeyboardButton("🔐 تسجيل الدخول", callback_data="login")],
-                    [InlineKeyboardButton("📊 الإحصائيات", callback_data="user_stats")],
-                    [InlineKeyboardButton("⚙️ إعدادات الحساب", callback_data="account_settings")]
-                ]
+    if has_active_subscription:
+        expires_at = datetime.strptime(users[str(user.id)]["expires_at"], "%Y-%m-%d %H:%M:%S")
+        remaining_days = (expires_at - datetime.now()).days
+        
+        has_active_session = has_session(user.id)
+        
+        if has_active_session:
+            keyboard = [
+                [InlineKeyboardButton("🚀 بدء النشر", callback_data="start_posting")],
+                [InlineKeyboardButton("⏹ إيقاف النشر", callback_data="stop_posting")],
+                [InlineKeyboardButton("📊 الإحصائيات", callback_data="user_stats")],
+                [InlineKeyboardButton("⚙️ إعدادات الحساب", callback_data="account_settings")]
+            ]
         else:
             keyboard = [
-                [InlineKeyboardButton("🔓 تفعيل الاشتراك", callback_data="activate_subscription")]
+                [InlineKeyboardButton("🔐 تسجيل الدخول", callback_data="login")],
+                [InlineKeyboardButton("📊 الإحصائيات", callback_data="user_stats")],
+                [InlineKeyboardButton("⚙️ إعدادات الحساب", callback_data="account_settings")]
             ]
+    else:
+        keyboard = [
+            [InlineKeyboardButton("🔓 تفعيل الاشتراك", callback_data="activate_subscription")]
+        ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -261,15 +279,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     
-    if data == "user_panel":
-        return await user_panel(update, context)
-    elif data == "admin_panel":
-        return await admin_panel(update, context)
-    elif data == "start_posting":
-        return await start_posting(update, context)
-    elif data == "stop_posting":
-        return await stop_posting(update, context)
-    elif data == "user_stats":
+    if data == "user_stats":
         return await user_statistics(update, context)
     elif data == "account_settings":
         return await account_settings(update, context)
@@ -280,6 +290,12 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "لتفعيل الاشتراك، يرجى إدخال كود التفعيل باستخدام الأمر:\n/activate كود_التفعيل"
         )
         return MAIN_MENU
+    elif data == "start_posting":
+        return await start_posting(update, context)
+    elif data == "stop_posting":
+        return await stop_posting(update, context)
+    elif data == "back_main":
+        return await main_menu(update, context)
 
 # لوحة المستخدم
 async def user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -321,11 +337,16 @@ async def handle_user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return USER_SETTINGS
     elif data == "back_main":
         return await main_menu(update, context)
+    elif data == "back_user":
+        return await user_panel(update, context)
 
-# لوحة المدير
+# لوحة المدير - تظهر فقط عند استخدام /admin
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    user = update.effective_user
+    
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمدير فقط.")
+        return ConversationHandler.END
     
     keyboard = [
         [InlineKeyboardButton("🔑 إنشاء كود تفعيل", callback_data="generate_code")],
@@ -339,10 +360,16 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        "👑 لوحة المدير\n\nاختر الإجراء الذي تريد تنفيذه:",
-        reply_markup=reply_markup
-    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            "👑 لوحة المدير\n\nاختر الإجراء الذي تريد تنفيذه:",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(
+            "👑 لوحة المدير\n\nاختر الإجراء الذي تريد تنفيذه:",
+            reply_markup=reply_markup
+        )
     
     return ADMIN_PANEL
 
@@ -384,6 +411,8 @@ async def handle_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return VIEW_USER
     elif data == "admin_stats":
         return await admin_statistics(update, context)
+    elif data == "back_admin":
+        return await admin_panel(update, context)
     elif data == "back_main":
         return await main_menu(update, context)
 
@@ -752,6 +781,10 @@ async def handle_set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await main_menu(update, context)
 
+# الأمر /admin - للوصول إلى لوحة المدير
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await admin_panel(update, context)
+
 # الأمر /activate
 async def activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -782,6 +815,7 @@ def main():
     
     # إضافة معالجات الأوامر
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin))
     application.add_handler(CommandHandler("activate", activate))
     
     # إضافة معالجات المحادثة
@@ -814,4 +848,4 @@ def main():
     application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main() 
