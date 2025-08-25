@@ -1,15 +1,10 @@
 import telebot
 from telebot.types import ReplyKeyboardRemove
-import config  # استيراد كامل الملف بدلاً من استيراد متغيرات محددة
+from config import BOT_TOKEN, ADMIN_USER_ID, CHANNEL_USERNAME
 import handlers
 import utils
 
-# استخدام المتغيرات من config
-bot = telebot.TeleBot(config.BOT_TOKEN)
-ADMIN_USER_ID = config.ADMIN_USER_ID
-CHANNEL_USERNAME = config.CHANNEL_USERNAME
-
-# باقي الكود بدون تغيير...
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # متغيرات البحث
 user_search_data = {}
