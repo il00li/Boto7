@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 
 # توكن البوت - تم توفيره (يجب استبداله بالتوكن الكامل)
-API_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8324471840:AAE5vL7o3yL8z6y1Q2ZQ3XyZ3XyZ3XyZ3Xy')
+API_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8324471840:AAGQWz5A1nnxIU2NnBnYN1C3TtHz1d_VZDE')
 bot = telebot.TeleBot(API_TOKEN)
 
 # إعدادات المدير
