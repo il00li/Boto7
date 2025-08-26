@@ -20,7 +20,7 @@ TOKEN = '8324471840:AAFqTHWy4-FZFIHGusm5RWk1Y240cV32SCw'
 PIXABAY_API_KEY = '51444506-bffefcaf12816bd85a20222d1'
 LUMNI_API_KEY = 'lummi-b06d12ba02329efb74404de07e20b434aff295de34419f35c56eb3e200f05a71'
 ADMIN_ID = 6689435577  # معرف المدير
-WEBHOOK_URL = 'https://autu2.onrender.com/webhook'  # تأكد من تطابق هذا مع عنوان URL الخاص بك
+WEBHOOK_URL = 'https://boto7-0c3p.onrender.com/webhook'  # تأكد من تطابق هذا مع عنوان URL الخاص بك
 
 app = Flask(__name__)
 bot = telebot.TeleBot(TOKEN)
