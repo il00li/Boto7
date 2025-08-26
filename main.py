@@ -1,379 +1,240 @@
 import telebot
 from telebot import types
-import json
-import os
-import random
-import string
-from datetime import datetime, timedelta
+import config
+import database
+import requests
 
-# إعدادات البوت
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8324471840:AAFqTHWy4-FZFIHGusm5RWk1Y240cV32SCw')
-ADMIN_ID = int(os.getenv('ADMIN_ID', 6689435577))
-CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME', '@iIl337')
-MAIN_CHANNEL = os.getenv('MAIN_CHANNEL', '@GRABOT7')
-DEVELOPER_USERNAME = os.getenv('DEVELOPER_USERNAME', '@OlIiIl7')
+bot = telebot.TeleBot(config.TOKEN)
 
-# مسارات ملفات التخزين
-USERS_FILE = "users.json"
-SEARCH_TYPES_FILE = "search_types.json"
-INVITES_FILE = "invites.json"
+# تهيئة قاعدة البيانات
+database.init_db()
 
-# وظائف التخزين
-def ensure_file_exists(file_path):
-    """تأكد من وجود الملف، وإنشائه إذا لم يكن موجوداً"""
-    if not os.path.exists(file_path):
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump({}, f, ensure_ascii=False, indent=4)
-
-def read_json(file_path):
-    """قراءة ملف JSON"""
-    ensure_file_exists(file_path)
+# دالة التحقق من الاشتراك
+def is_subscribed(user_id):
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
-
-def write_json(file_path, data):
-    """كتابة بيانات إلى ملف JSON"""
-    ensure_file_exists(file_path)
-    with open(file_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-# دوال لإدارة المستخدمين
-def get_user(user_id):
-    """الحصول على بيانات مستخدم"""
-    users = read_json(USERS_FILE)
-    user_id_str = str(user_id)
-    return users.get(user_id_str, {})
-
-def save_user(user_id, user_data):
-    """حفظ بيانات مستخدم"""
-    users = read_json(USERS_FILE)
-    user_id_str = str(user_id)
-    users[user_id_str] = user_data
-    write_json(USERS_FILE, users)
-
-def get_all_users():
-    """الحصول على جميع المستخدمين"""
-    return read_json(USERS_FILE)
-
-def update_user_subscription(user_id, days=30):
-    """تحديث اشتراك المستخدم"""
-    user = get_user(user_id)
-    if not user:
-        user = {}
-    
-    subscription_end = datetime.now() + timedelta(days=days)
-    user['subscription_end'] = subscription_end.isoformat()
-    user['is_banned'] = False
-    
-    save_user(user_id, user)
-
-def check_subscription(user_id):
-    """التحقق من صلاحية اشتراك المستخدم"""
-    user = get_user(user_id)
-    if not user or user.get('is_banned', False):
-        return False
-    
-    subscription_end = user.get('subscription_end')
-    if not subscription_end:
-        return False
-    
-    try:
-        end_date = datetime.fromisoformat(subscription_end)
-        return end_date > datetime.now()
-    except (ValueError, TypeError):
-        return False
-
-# دوال لأنواع البحث
-def get_search_type(user_id):
-    """الحصول على نوع البحث للمستخدم"""
-    search_types = read_json(SEARCH_TYPES_FILE)
-    user_id_str = str(user_id)
-    return search_types.get(user_id_str, 'illustration')
-
-def set_search_type(user_id, search_type):
-    """تعيين نوع البحث للمستخدم"""
-    search_types = read_json(SEARCH_TYPES_FILE)
-    user_id_str = str(user_id)
-    search_types[user_id_str] = search_type
-    write_json(SEARCH_TYPES_FILE, search_types)
-
-# دوال لإدارة الدعوات
-def get_invite_code(user_id):
-    """الحصول على كود الدعوة للمستخدم"""
-    user = get_user(user_id)
-    return user.get('invite_code')
-
-def set_invite_code(user_id, invite_code):
-    """تعيين كود الدعوة للمستخدم"""
-    user = get_user(user_id)
-    if not user:
-        user = {}
-    
-    user['invite_code'] = invite_code
-    save_user(user_id, user)
-
-def increment_invite_count(user_id):
-    """زيادة عداد الدعوات للمستخدم"""
-    user = get_user(user_id)
-    if not user:
-        user = {}
-    
-    current_count = user.get('invited_count', 0)
-    user['invited_count'] = current_count + 1
-    save_user(user_id, user)
-    
-    # إذا وصل عدد الدعوات إلى 10، تفعيل الاشتراك
-    if user['invited_count'] >= 10:
-        update_user_subscription(user_id, 30)
-    
-    return user['invited_count']
-
-def add_invite_record(invite_code, owner_id, used_by):
-    """إضافة سجل دعوة"""
-    invites = read_json(INVITES_FILE)
-    invite_id = str(len(invites) + 1)
-    invites[invite_id] = {
-        'invite_code': invite_code,
-        'owner_id': owner_id,
-        'used_by': used_by,
-        'created_at': datetime.now().isoformat()
-    }
-    write_json(INVITES_FILE, invites)
-
-def find_user_by_invite_code(invite_code):
-    """البحث عن مستخدم بواسطة كود الدعوة"""
-    users = get_all_users()
-    for user_id, user_data in users.items():
-        if user_data.get('invite_code') == invite_code:
-            return int(user_id)
-    return None
-
-# وظائف الأدوات المساعدة
-def is_subscribed(bot, user_id, channel_username):
-    try:
-        chat_member = bot.get_chat_member(channel_username.replace('@', ''), user_id)
-        return chat_member.status in ['member', 'administrator', 'creator']
+        member = bot.get_chat_member(config.CHANNEL_ID, user_id)
+        return member.status in ['member', 'administrator', 'creator']
     except:
         return False
 
-def generate_invite_code(length=10):
-    characters = string.ascii_letters + string.digits
-    return ''.join(random.choice(characters) for _ in range(length))
+# دالة إرسال رسالة الاشتراك الإجباري
+def send_subscription_message(chat_id):
+    markup = types.InlineKeyboardMarkup()
+    btn_channel = types.InlineKeyboardButton("اشترك في القناة 🌐", url=config.CHANNEL_URL)
+    btn_check = types.InlineKeyboardButton("تحقق 👀", callback_data="check_subscription")
+    markup.add(btn_channel)
+    markup.add(btn_check)
+    bot.send_message(chat_id, "(／。＼)ノ\nاشتراك في القناة عبر الزر بالأسفل ثم اضغط على \"تحقق 👀\"", reply_markup=markup)
 
-# وظائف لوحة المفاتيح
-def main_menu_keyboard():
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    
-    keyboard.add(
-        types.InlineKeyboardButton("بدء البحث 🫐", callback_data="start_search"),
-        types.InlineKeyboardButton("نوع البحث 🍇", callback_data="search_type"),
-        types.InlineKeyboardButton("معلومات 🪻", callback_data="info"),
-        types.InlineKeyboardButton("اشتراك مجاني 🏖️", callback_data="free_subscription")
-    )
-    
-    return keyboard
+# الدالة الرئيسية — عرض القائمة
+def main_menu():
+    markup = types.InlineKeyboardMarkup()
+    btn_search = types.InlineKeyboardButton("بدء البحث 🫐", callback_data="start_search")
+    btn_type = types.InlineKeyboardButton("نوع البحث 🍇", callback_data="select_type")
+    btn_info = types.InlineKeyboardButton("معلومات 🪻", callback_data="info")
+    markup.row(btn_type)
+    markup.row(btn_search)
+    markup.row(btn_info)
+    return markup
 
-def search_type_keyboard(selected_type=None):
-    keyboard = types.InlineKeyboardMarkup(row_width=1)
-    
-    types_list = [
-        ("Illustration | رسومات", "illustration"),
-        ("Photo | صور", "photo"),
-        ("Video | فيديو", "video")
-    ]
-    
-    for name, callback in types_list:
-        if selected_type == callback:
-            name = f"🪐 {name}"
-        keyboard.add(types.InlineKeyboardButton(name, callback_data=f"set_type_{callback}"))
-    
-    keyboard.add(types.InlineKeyboardButton("رجوع", callback_data="back_to_main"))
-    
-    return keyboard
-
-def subscription_keyboard(user_id):
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    
-    keyboard.add(
-        types.InlineKeyboardButton("طلب الاشتراك من المطور", url=f"tg://user?id={DEVELOPER_USERNAME.replace('@', '')}"),
-        types.InlineKeyboardButton("اشتراك مجاني 🏖️", callback_data="free_subscription"),
-        types.InlineKeyboardButton("تحقق 👀", callback_data="check_subscription")
-    )
-    
-    return keyboard
-
-def force_subscribe_keyboard():
-    keyboard = types.InlineKeyboardMarkup()
-    
-    keyboard.add(
-        types.InlineKeyboardButton("اشترك في القناة", url=f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}"),
-        types.InlineKeyboardButton("تحقق 👀", callback_data="check_subscription")
-    )
-    
-    return keyboard
-
-def admin_keyboard():
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    
-    keyboard.add(
-        types.InlineKeyboardButton("إرسال إشعار للجميع", callback_data="admin_broadcast"),
-        types.InlineKeyboardButton("عرض المستخدمين", callback_data="admin_list_users"),
-        types.InlineKeyboardButton("حظر مستخدم", callback_data="admin_ban_user"),
-        types.InlineKeyboardButton("رفع حظر مستخدم", callback_data="admin_unban_user")
-    )
-    
-    return keyboard
-
-# تهيئة البوت
-bot = telebot.TeleBot(BOT_TOKEN)
-
-# معالجة الأمر /start
+# أمر /start
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
+def start(message):
     user_id = message.from_user.id
-    username = message.from_user.username
-    full_name = message.from_user.full_name
-    
-    # حفظ المستخدم إذا لم يكن موجوداً
-    user_data = get_user(user_id)
-    if not user_data:
-        user_data = {
-            'username': username,
-            'full_name': full_name,
-            'subscription_end': None,
-            'is_banned': False,
-            'invite_code': None,
-            'invited_count': 0
-        }
-        save_user(user_id, user_data)
-    
-    # معالجة رابط الدعوة إذا وجد
+    username = message.from_user.username or "unknown"
+    referrer_id = None
+
+    # معالجة رابط الدعوة
     if len(message.text.split()) > 1:
-        invite_code = message.text.split()[1]
-        
-        # البحث عن صاحب كود الدعوة
-        owner_id = find_user_by_invite_code(invite_code)
-        if owner_id and owner_id != user_id:
-            # زيادة عداد الدعوات لصاحب الكود
-            new_count = increment_invite_count(owner_id)
-            
-            # إرسال إشعار لصاحب الدعوة
-            try:
-                bot.send_message(owner_id, f"🎉 انضم عضو جديد عبر رابط الدعوة الخاص بك! الآن لديك {new_count} دعوة.")
-            except:
-                pass
-    
-    # التحقق من الاشتراك في القناة
-    if not is_subscribed(bot, user_id, CHANNEL_USERNAME):
-        bot.send_message(message.chat.id, 
-                        "(／。＼)ノ\nاشتراك في القناة عبر الزر بالأسفل ثم اضغط على \"تحقق 👀\"", 
-                        reply_markup=force_subscribe_keyboard())
-        return
-    
-    # إرسال رسالة الترحيب
-    welcome_text = "(＾▽＾)／ \nاختر نوع البحث من\" نوع البحث 🍇\" وابدء البحث عبر \"بدء البحث 🫐\"\n\nالمطور @OlIiIl7"
-    bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard())
+        ref_code = message.text.split()[1]
+        if ref_code.startswith("ref") and ref_code[3:].isdigit():
+            referrer_id = int(ref_code[3:])
+            if referrer_id != user_id:
+                database.add_user(referrer_id, "", ref_code)  # تأكد من وجود المرجع
 
-# معالجة الأزرار الإنلاين
+    database.add_user(user_id, username, database.generate_referral_code(user_id))
+    user = database.get_user(user_id)
+
+    if user[8] == 1:  # إذا كان محظورًا
+        bot.send_message(user_id, "🚫 تم حظرك من استخدام هذا البوت.")
+        return
+
+    bot.send_message(user_id, 
+        "(＾▽＾)／ \n"
+        "اختر نوع البحث من \"نوع البحث 🍇\" وابدء البحث عبر \"بدء البحث 🫐\"", 
+        reply_markup=main_menu())
+
+# الكولباكات
 @bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
+def callback_query(call):
     user_id = call.from_user.id
-    chat_id = call.message.chat.id
-    message_id = call.message.message_id
-    
-    # التحقق من الاشتراك أولاً
-    if not is_subscribed(bot, user_id, CHANNEL_USERNAME) and call.data != "check_subscription":
-        bot.answer_callback_query(call.id, "يجب الاشتراك في القناة أولاً")
-        return
-    
-    if call.data == "start_search":
-        # التحقق من صلاحية البحث
-        if not check_subscription(user_id):
-            bot.answer_callback_query(call.id, "ليس لديك صلاحية البحث")
-            bot.edit_message_text("(ง'‌-'‌)ง\nليس لديك صلاحية البحث، انقر على الزر ادناة لطلب الاشتراك", 
-                                 chat_id, message_id, 
-                                 reply_markup=subscription_keyboard(user_id))
-            return
-        
-        # بدء البحث بناءً على النوع المحدد
-        search_type = get_search_type(user_id)
-        # هنا يمكنك إضافة منطق البحث الفعلي
-        bot.answer_callback_query(call.id, f"سيتم البحث عن {search_type}")
-    
-    elif call.data == "search_type":
-        current_type = get_search_type(user_id)
-        bot.edit_message_text("اختر نوع البحث:", chat_id, message_id, 
-                             reply_markup=search_type_keyboard(current_type))
-    
-    elif call.data.startswith("set_type_"):
-        search_type = call.data.split("_")[2]
-        set_search_type(user_id, search_type)
-        bot.answer_callback_query(call.id, f"تم اختيار: {search_type}")
-        bot.edit_message_reply_markup(chat_id, message_id, 
-                                     reply_markup=search_type_keyboard(search_type))
-    
-    elif call.data == "back_to_main":
-        welcome_text = "(＾▽＾)／ \nاختر نوع البحث من\" نوع البحث 🍇\" وابدء البحث عبر \"بدء البحث 🫐\"\n\nالمطور @OlIiIl7"
-        bot.edit_message_text(welcome_text, chat_id, message_id, 
-                             reply_markup=main_menu_keyboard())
-    
-    elif call.data == "info":
-        info_text = """
-💛 | البوت مدفوع ، يمكنك طلب الاشتراك من المطور @OlIiIl7
-🧡 | يمكن الحصول على الاشتراك عن طريق رابط الدعوة ، قم بدعوة 10 اشخاص للحصول عليها
-❤️ | او يمكنك الحصول على الملحقات التي تم البحث عنها في القناة @GRABOT7
-🤍 | ترقبو التحديثات القادمة 
-https://t.me/iIl337
+    user = database.get_user(user_id)
 
-- قناة الاشتراك الاجباري
-https://t.me/iIl337
-        """
-        bot.edit_message_text(info_text, chat_id, message_id, 
-                             reply_markup=main_menu_keyboard())
-    
-    elif call.data == "free_subscription":
-        # إنشاء رابط دعوة فريد
-        invite_code = get_invite_code(user_id)
-        
-        if not invite_code:
-            invite_code = generate_invite_code()
-            set_invite_code(user_id, invite_code)
-        
-        invite_link = f"https://t.me/{bot.get_me().username}?start={invite_code}"
-        bot.edit_message_text(f"رابط الدعوة الخاص بك:\n{invite_link}\n\nادعُ 10 أصدقاء للحصول على اشتراك مجاني لمدة شهر!", 
-                             chat_id, message_id, 
-                             reply_markup=main_menu_keyboard())
-    
-    elif call.data == "check_subscription":
-        if is_subscribed(bot, user_id, CHANNEL_USERNAME):
-            welcome_text = "(＾▽＾)／ \nاختر نوع البحث من\" نوع البحث 🍇\" وابدء البحث عبر \"بدء البحث 🫐\"\n\nالمطور @OlIiIl7"
-            bot.edit_message_text(welcome_text, chat_id, message_id, 
-                                 reply_markup=main_menu_keyboard())
+    if user and user[8] == 1:  # محظور
+        bot.answer_callback_query(call.id, "🚫 أنت محظور من استخدام هذا البوت.")
+        return
+
+    if call.data == "info":
+        referral_link = f"https://t.me/{config.BOT_USERNAME}?start={user[3]}"
+        info_msg = (
+            "💛 | البوت مدفوع ، يمكنك طلب الاشتراك من المطور @OlIiIl7\n"
+            "🧡 | يمكن الحصول على الاشتراك عن طريق رابط الدعوة ، قم بدعوة 10 اشخاص للحصول عليها\n"
+            "❤️ | او يمكنك الحصول على الملحقات التي تم البحث عنها في القناة @GRABOT7\n"
+            "🤍 | ترقبو التحديثات القادمة \n"
+            "https://t.me/iIl337  \n\n"
+            f"🔗 رابط الدعوة الخاص بك:\n{referral_link}\n"
+            "عدد من دعوتهم: " + str(user[6]) + "/10"
+        )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("رجوع 🏡", callback_data="back_main"))
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                              text=info_msg, reply_markup=markup)
+
+    elif call.data == "select_type":
+        markup = types.InlineKeyboardMarkup()
+        current_type = user[2] if user[2] else None
+
+        # أزرار الأنواع
+        types_btns = [
+            ("Illustration | رسومات", "type_illustration"),
+            ("Photo | صور", "type_photo"),
+            ("Video | فيديو", "type_video")
+        ]
+
+        for text, cb_data in types_btns:
+            mark = " 🪐" if current_type and cb_data == f"type_{current_type.lower()}" else ""
+            markup.add(types.InlineKeyboardButton(text + mark, callback_data=cb_data))
+
+        markup.add(types.InlineKeyboardButton("رجوع 🏡", callback_data="back_main"))
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                              text="اختر نوع البحث:", reply_markup=markup)
+
+    elif call.data.startswith("type_"):
+        search_type = call.data.split("_")[1].capitalize()
+        database.update_search_type(user_id, search_type)
+        bot.answer_callback_query(call.id, f"✅ تم تعيين نوع البحث إلى: {search_type}")
+        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                      reply_markup=main_menu())
+
+    elif call.data == "start_search":
+        if not is_subscribed(user_id):
+            send_subscription_message(user_id)
+            return
+
+        if user[4] == 0:  # غير مشترك في العضوية
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("طلب الاشتراك 💬", url=f"tg://user?id={config.OWNER_ID}"))
+            markup.add(types.InlineKeyboardButton("اشتراك مجاني 🏖️", callback_data="referral"))
+            bot.send_message(user_id, 
+                "(ง'‌-'‌)ง\n"
+                "ليس لديك صلاحية البحث، انقر على الزر أدناه لطلب الاشتراك", 
+                reply_markup=markup)
         else:
-            bot.answer_callback_query(call.id, "لم تشترك في القناة بعد")
-    
-    # أوامر المدير
-    elif call.data == "admin_panel" and user_id == ADMIN_ID:
-        bot.edit_message_text("لوحة تحكم المدير", chat_id, message_id, 
-                             reply_markup=admin_keyboard())
-    
-    elif call.data == "admin_list_users" and user_id == ADMIN_ID:
-        users = get_all_users()
-        users_text = "قائمة المستخدمين:\n\n"
-        for uid, user_data in users.items():
-            users_text += f"ID: {uid}, Name: {user_data.get('full_name', 'N/A')}, Username: @{user_data.get('username', 'N/A')}\n"
-        
-        bot.edit_message_text(users_text, chat_id, message_id, 
-                             reply_markup=admin_keyboard())
+            bot.send_message(user_id, f"🔎 جاري البحث عن {user[2]}... (مُزيف للتجربة)")
+
+    elif call.data == "referral":
+        referral_link = f"https://t.me/{config.BOT_USERNAME}?start={user[3]}"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("رجوع 🏡", callback_data="back_main"))
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=f"🔗 شارك هذا الرابط مع أصدقائك:\n\n{referral_link}\n\nعدد من دعوتهم: {user[6]}/10",
+            reply_markup=markup
+        )
+
+    elif call.data == "check_subscription":
+        if is_subscribed(user_id):
+            database.set_subscription(user_id, 1)
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                  text="✅ تم التحقق! يمكنك الآن استخدام البوت.", reply_markup=main_menu())
+        else:
+            bot.answer_callback_query(call.id, "❌ لم تُشترك بعد!")
+
+    elif call.data == "back_main":
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                              text="(＾▽＾)／ \nاختر نوع البحث من \"نوع البحث 🍇\" وابدء البحث عبر \"بدء البحث 🫐\"",
+                              reply_markup=main_menu())
+
+# مراقبة روابط الدعوة
+@bot.message_handler(func=lambda message: message.text.startswith("/start ref"))
+def handle_referral(message):
+    referrer_id = int(message.text.split("ref")[1])
+    user_id = message.from_user.id
+    if user_id == referrer_id:
+        return
+    user = database.get_user(referrer_id)
+    if user:
+        count = database.increment_referral(referrer_id)
+        bot.send_message(referrer_id, f"🎉 شخص جديد انضم عبر رابطك! العدد: {count}/10")
+        if count >= 10:
+            database.set_subscription(referrer_id, 1)
+            bot.send_message(referrer_id, "🎉 تم تفعيل عضويتك المدفوعة لمدة شهر! يمكنك الآن البحث.")
 
 # أوامر المدير
-@bot.message_handler(commands=['admin'], func=lambda message: message.from_user.id == ADMIN_ID)
-def admin_panel(message):
-    bot.send_message(message.chat.id, "لوحة تحكم المدير", reply_markup=admin_keyboard())
+@bot.message_handler(commands=['ban'])
+def ban_user_cmd(message):
+    if message.from_user.id != config.OWNER_ID:
+        return
+    try:
+        user_id = int(message.text.split()[1])
+        database.ban_user(user_id)
+        bot.send_message(message.chat.id, f"✅ تم حظر المستخدم {user_id}")
+    except:
+        bot.send_message(message.chat.id, "❌ خطأ في حظر المستخدم.")
 
-if __name__ == "__main__":
+@bot.message_handler(commands=['unban'])
+def unban_user_cmd(message):
+    if message.from_user.id != config.OWNER_ID:
+        return
+    try:
+        user_id = int(message.text.split()[1])
+        database.unban_user(user_id)
+        bot.send_message(message.chat.id, f"✅ تم فك الحظر عن المستخدم {user_id}")
+    except:
+        bot.send_message(message.chat.id, "❌ خطأ في فك الحظر.")
+
+@bot.message_handler(commands=['activate'])
+def activate_user(message):
+    if message.from_user.id != config.OWNER_ID:
+        return
+    try:
+        user_id = int(message.text.split()[1])
+        database.set_subscription(user_id, 1)
+        bot.send_message(message.chat.id, f"✅ تم تفعيل العضوية للمستخدم {user_id}")
+        bot.send_message(user_id, "🎉 تم تفعيل عضويتك من قبل المدير!")
+    except:
+        bot.send_message(message.chat.id, "❌ خطأ في التفعيل.")
+
+@bot.message_handler(commands=['deactivate'])
+def deactivate_user(message):
+    if message.from_user.id != config.OWNER_ID:
+        return
+    try:
+        user_id = int(message.text.split()[1])
+        database.set_subscription(user_id, 0)
+        bot.send_message(message.chat.id, f"✅ تم إلغاء العضوية للمستخدم {user_id}")
+        bot.send_message(user_id, "⚠️ تم إلغاء عضويتك.")
+    except:
+        bot.send_message(message.chat.id, "❌ خطأ في الإلغاء.")
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast(message):
+    if message.from_user.id != config.OWNER_ID:
+        return
+    text = message.text[len("/broadcast "):]
+    if not text:
+        bot.send_message(message.chat.id, "استخدم: /broadcast [الرسالة]")
+        return
+    user_ids = database.get_all_user_ids()
+    for uid in user_ids:
+        try:
+            bot.send_message(uid, text)
+        except Exception as e:
+            print(f"فشل في إرسال للمستخدم {uid}: {e}")
+    bot.send_message(message.chat.id, f"✅ تم الإرسال إلى {len(user_ids)} مستخدمًا.")
+
+# تشغيل البوت
+if __name__ == '__main__':
     print("Bot is running...")
-    bot.infinity_polling()
+    bot.polling(none_stop=True) 
