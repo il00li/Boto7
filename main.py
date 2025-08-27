@@ -18,9 +18,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = '8324471840:AAHJrXuoAKmb0wmWMle3AnqbPt7Hj6zNQVI'
+TOKEN = '7966976239:AAFjCFXvxixZqnfBrfqftj0iXmcX67WI7lY'
 PIXABAY_API_KEY = '51444506-bffefcaf12816bd85a20222d1'
-ADMIN_ID = 6689435577  # معرف المدير
+ADMIN_ID = 8419586314  # معرف المدير
 WEBHOOK_URL = 'https://boto7-0c3p.onrender.com/webhook'  # تأكد من تطابق هذا مع عنوان URL الخاص بك
 
 app = Flask(__name__)
